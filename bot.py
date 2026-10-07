@@ -7,9 +7,10 @@ import random
 import re
 import time
 from contextlib import suppress
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
-import aiosqlite
+import asyncpg
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -30,7 +31,7 @@ PROVIDER_URL = os.getenv("PROVIDER_URL", "")
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 SERVICE_ID = os.getenv("SERVICE_ID", "")
 FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "")  # مثلا @mychannel ، خالی = غیرفعال
-DB_PATH = os.getenv("DB_PATH", "bot.db")
+DATABASE_URL = os.environ["DATABASE_URL"]
 MIN_TOPUP = int(os.getenv("MIN_TOPUP", "10000"))
 TOPUP_TTL = int(os.getenv("TOPUP_TTL_MIN", "30")) * 60
 CREDIT_FULL = os.getenv("CREDIT_FULL", "0") == "1"  # 1 = کل مبلغ واریزی (با عدد رندوم) شارژ شود
@@ -64,34 +65,78 @@ MENU = ReplyKeyboardMarkup(
 
 router = Router()
 IS_ADMIN = F.from_user.id.in_(ADMIN_IDS)
-db: aiosqlite.Connection
+db = None  # در init_db ساخته می‌شه
+
+
+def clean_dsn(url):
+    p = urlsplit(url)
+    q = [(k, v) for k, v in parse_qsl(p.query) if k != "channel_binding"]
+    return urlunsplit(p._replace(query=urlencode(q)))
+
+
+class Result:
+    def __init__(self, rowcount=0):
+        self.rowcount = rowcount
+
+
+class PG:
+    """لایه‌ی کوچیک روی asyncpg تا بقیه‌ی کد با ? و rowcount کار کنه."""
+
+    def __init__(self, pool):
+        self.pool = pool
+
+    @staticmethod
+    def q(sql):
+        n, out = 0, []
+        for ch in sql:
+            if ch == "?":
+                n += 1
+                out.append(f"${n}")
+            else:
+                out.append(ch)
+        return "".join(out)
+
+    async def execute(self, sql, args=()):
+        status = await self.pool.execute(self.q(sql), *args)
+        try:
+            return Result(int(status.split()[-1]))
+        except (ValueError, IndexError):
+            return Result(0)
+
+    async def insert(self, sql, args=()):
+        return await self.pool.fetchval(self.q(sql) + " RETURNING id", *args)
+
+    async def commit(self):  # autocommit
+        pass
+
+
+SCHEMA = [
+    "CREATE TABLE IF NOT EXISTS users(id BIGINT PRIMARY KEY, username TEXT, balance BIGINT DEFAULT 0, banned INTEGER DEFAULT 0, joined BIGINT)",
+    "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)",
+    "CREATE TABLE IF NOT EXISTS topups(id BIGSERIAL PRIMARY KEY, user_id BIGINT, base BIGINT, unique_amount BIGINT, credited BIGINT DEFAULT 0, status TEXT, created BIGINT, expires BIGINT)",
+    "CREATE TABLE IF NOT EXISTS orders(id BIGSERIAL PRIMARY KEY, user_id BIGINT, link TEXT, quantity BIGINT, cost BIGINT, provider_order TEXT, status TEXT, settled INTEGER DEFAULT 0, created BIGINT)",
+    "CREATE TABLE IF NOT EXISTS ledger(id BIGSERIAL PRIMARY KEY, user_id BIGINT, amount BIGINT, reason TEXT, ts BIGINT)",
+]
 
 
 # ───────────────────────── دیتابیس ─────────────────────────
 async def init_db():
     global db
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    await db.executescript("""
-    CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT, balance INTEGER DEFAULT 0, banned INTEGER DEFAULT 0, joined INTEGER);
-    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE IF NOT EXISTS topups(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, base INTEGER, unique_amount INTEGER, credited INTEGER DEFAULT 0, status TEXT, created INTEGER, expires INTEGER);
-    CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, link TEXT, quantity INTEGER, cost INTEGER, provider_order TEXT, status TEXT, settled INTEGER DEFAULT 0, created INTEGER);
-    CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, reason TEXT, ts INTEGER);
-    """)
+    pool = await asyncpg.create_pool(clean_dsn(DATABASE_URL), min_size=1, max_size=5,
+                                     statement_cache_size=0, command_timeout=30)
+    db = PG(pool)
+    for stmt in SCHEMA:
+        await db.execute(stmt)
     for k, v in DEFAULTS.items():
-        await db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (k, v))
-    await db.commit()
+        await db.execute("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT (key) DO NOTHING", (k, v))
 
 
 async def one(sql, args=()):
-    cur = await db.execute(sql, args)
-    return await cur.fetchone()
+    return await db.pool.fetchrow(PG.q(sql), *args)
 
 
 async def many(sql, args=()):
-    cur = await db.execute(sql, args)
-    return await cur.fetchall()
+    return await db.pool.fetch(PG.q(sql), *args)
 
 
 async def get_setting(key):
@@ -99,8 +144,8 @@ async def get_setting(key):
 
 
 async def set_setting(key, value):
-    await db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, str(value)))
-    await db.commit()
+    await db.execute("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+                     (key, str(value)))
 
 
 async def balance_change(uid, delta, reason):
@@ -212,7 +257,7 @@ class Guard(BaseMiddleware):
         user = data.get("event_from_user")
         if user is None:
             return await handler(event, data)
-        await db.execute("INSERT OR IGNORE INTO users(id,username,joined) VALUES (?,?,?)",
+        await db.execute("INSERT INTO users(id,username,joined) VALUES (?,?,?) ON CONFLICT (id) DO NOTHING",
                          (user.id, user.username, int(time.time())))
         await db.execute("UPDATE users SET username=? WHERE id=?", (user.username, user.id))
         await db.commit()
@@ -326,12 +371,11 @@ async def charge_amount(m: Message, state: FSMContext):
     if unique is None:
         return await m.answer("الان ظرفیت پر شده، چند دقیقه دیگه امتحان کن.")
     now = int(time.time())
-    cur = await db.execute(
+    tid = await db.insert(
         "INSERT INTO topups(user_id,base,unique_amount,status,created,expires) VALUES (?,?,?,?,?,?)",
         (m.from_user.id, base, unique, "pending", now, now + TOPUP_TTL))
-    await db.commit()
     await state.clear()
-    t = await one("SELECT * FROM topups WHERE id=?", (cur.lastrowid,))
+    t = await one("SELECT * FROM topups WHERE id=?", (tid,))
     await m.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
 
 
