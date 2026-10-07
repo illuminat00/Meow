@@ -6,6 +6,7 @@ import os
 import random
 import re
 import time
+import traceback
 from contextlib import suppress
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -14,11 +15,12 @@ import asyncpg
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (CallbackQuery, InlineKeyboardButton,
+from aiogram.types import (CallbackQuery, ErrorEvent, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, Message,
                            ReplyKeyboardMarkup)
 from dotenv import load_dotenv
@@ -49,9 +51,18 @@ DEFAULTS = {
     "support": os.getenv("SUPPORT_USERNAME", ""),
 }
 
-LINK_RE = re.compile(r"https?://t\.me/(?:c/)?[A-Za-z0-9_]+/\d+")
+LINK_RE = re.compile(r"https?://t\.me/([A-Za-z][A-Za-z0-9_]{3,})/(\d+)")
+
+
+def extract_links(text):
+    out = []
+    for ch, pid in LINK_RE.findall(text or ""):
+        link = f"https://t.me/{ch}/{pid}"
+        if link not in out:
+            out.append(link)
+    return out[:MAX_LINKS]
 STATUS_FA = {
-    "Pending": "⏳ در صف", "Processing": "⚙️ در حال پردازش", "In progress": "⚙️ در حال انجام",
+    "Unknown": "⏳ در حال بررسی", "Pending": "⏳ در صف", "Processing": "⚙️ در حال پردازش", "In progress": "⚙️ در حال انجام",
     "Completed": "✅ تکمیل", "Partial": "◐ ناقص (مابقی برگشت خورد)",
     "Canceled": "❌ لغو (برگشت پول)", "Cancelled": "❌ لغو (برگشت پول)",
     "Refunded": "❌ برگشت پول", "Fail": "❌ ناموفق", "Failed": "❌ ناموفق",
@@ -123,6 +134,7 @@ SCHEMA = [
     "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)",
     "CREATE TABLE IF NOT EXISTS topups(id BIGSERIAL PRIMARY KEY, user_id BIGINT, base BIGINT, unique_amount BIGINT, credited BIGINT DEFAULT 0, status TEXT, created BIGINT, expires BIGINT)",
     "CREATE TABLE IF NOT EXISTS orders(id BIGSERIAL PRIMARY KEY, user_id BIGINT, link TEXT, quantity BIGINT, cost BIGINT, provider_order TEXT, status TEXT, settled INTEGER DEFAULT 0, created BIGINT)",
+    "ALTER TABLE topups ADD COLUMN IF NOT EXISTS receipt_uid TEXT",
     "CREATE TABLE IF NOT EXISTS ledger(id BIGSERIAL PRIMARY KEY, user_id BIGINT, amount BIGINT, reason TEXT, ts BIGINT)",
 ]
 
@@ -194,22 +206,48 @@ async def notify_admins(bot, text):
             await bot.send_message(a, text)
 
 
+_last_err = {}
+
+
+async def report_error(bot, where, exc):
+    """خطا رو برای ادمین می‌فرسته (هر خطای تکراری حداکثر هر ۵ دقیقه یک بار)."""
+    key = f"{where}:{type(exc).__name__}:{str(exc)[:60]}"
+    now = time.time()
+    if now - _last_err.get(key, 0) < 300:
+        return
+    _last_err[key] = now
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-1500:]
+    await notify_admins(bot, f"🚨 خطا در ربات ({where})\n<pre>{html.escape(tb)}</pre>")
+
+
 async def place_order(uid, link, qty, cost):
+    """نتیجه: ("ok", شماره‌ی provider) | ("failed", متن خطا) | ("unknown", شماره‌ی سفارش داخلی).
+    unknown یعنی معلوم نیست provider سفارش رو ثبت کرده یا نه؛ پول برنمی‌گرده تا ادمین بررسی کنه."""
+    res, err = None, ""
     try:
         res = await provider(action="add", service=SERVICE_ID, link=link, quantity=qty)
+    except aiohttp.ClientConnectorError as e:  # اصلاً به provider وصل نشده → مطمئنیم ثبت نشده
+        return "failed", str(e)
     except Exception as e:
-        res = {"error": str(e)}
+        err = str(e) or type(e).__name__
+    now = int(time.time())
     if isinstance(res, dict) and "order" in res:
         await db.execute(
             "INSERT INTO orders(user_id,link,quantity,cost,provider_order,status,created) VALUES (?,?,?,?,?,?,?)",
-            (uid, link, qty, cost, str(res["order"]), "Pending", int(time.time())))
-        await db.commit()
-        return True, res["order"]
-    return False, str(res.get("error", res) if isinstance(res, dict) else res)
+            (uid, link, qty, cost, str(res["order"]), "Pending", now))
+        return "ok", res["order"]
+    if isinstance(res, dict) and res.get("error"):
+        return "failed", str(res["error"])
+    oid = await db.insert(
+        "INSERT INTO orders(user_id,link,quantity,cost,provider_order,status,created) VALUES (?,?,?,?,?,?,?)",
+        (uid, link, qty, cost, "", "Unknown", now))
+    return "unknown", oid
 
 
 async def sync_order(o):
     """وضعیت سفارش رو از provider می‌گیره؛ در صورت لغو/ناقص، پول رو برمی‌گردونه."""
+    if not o["provider_order"]:
+        return None
     try:
         res = await provider(action="status", order=o["provider_order"])
     except Exception:
@@ -244,7 +282,7 @@ async def poll_orders(bot):
     while True:
         await asyncio.sleep(600)
         try:
-            for o in await many("SELECT * FROM orders WHERE settled=0 LIMIT 200"):
+            for o in await many("SELECT * FROM orders WHERE settled=0 AND provider_order<>'' LIMIT 200"):
                 r = await sync_order(o)
                 if r and r[2]:
                     msg = f"📦 سفارش #{o['id']}: {STATUS_FA.get(r[0], r[0])}"
@@ -256,8 +294,9 @@ async def poll_orders(bot):
                 res = await provider(action="balance")
                 if float(res.get("balance", 0)) < LOW_PROVIDER_BALANCE:
                     await notify_admins(bot, f"⚠️ موجودی provider کمه: {res.get('balance')} {res.get('currency', '')}")
-        except Exception:
+        except Exception as e:
             logging.exception("poll_orders")
+            await report_error(bot, "poll_orders", e)
 
 
 # ───────────────────────── Middleware (بن + عضویت اجباری) ─────────────────────────
@@ -640,12 +679,50 @@ async def order_start(m: Message, state: FSMContext):
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
+async def check_link(bot, link):
+    """None یعنی سالمه؛ در غیر این صورت متن مشکل."""
+    ch, pid = link.split("/")[3], link.split("/")[4]
+    try:
+        chat = await bot.get_chat(f"@{ch}")
+    except TelegramBadRequest:
+        return "کانال پیدا نشد یا عمومی نیست"
+    except Exception:
+        return None  # نتونستیم چک کنیم، بلاک نمی‌کنیم
+    if chat.type != "channel":
+        return "این لینک مربوط به یه کانال نیست"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as sess:
+            async with sess.get(f"https://t.me/{ch}/{pid}", params={"embed": "1", "mode": "tme"}) as r:
+                if "tgme_widget_message_error" in await r.text():
+                    return "پست پیدا نشد (شماره‌ی پست رو چک کن)"
+    except Exception:
+        pass
+    return None
+
+
 @router.message(Order.links, F.text)
-async def order_links(m: Message, state: FSMContext):
-    links = list(dict.fromkeys(LINK_RE.findall(m.text)))[:MAX_LINKS]
+async def order_links(m: Message, state: FSMContext, bot: Bot):
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[cancel_row()])
+    links = extract_links(m.text)
     if not links:
+        if "t.me/c/" in m.text:
+            return await m.answer("این لینک مربوط به کانال <b>خصوصی</b> 🔒 هست.\n"
+                                  "سین فقط برای پست‌های کانال‌های <b>عمومی</b> ثبت می‌شه.", reply_markup=cancel_kb)
         return await m.answer("لینکی پیدا نکردم 🤔\nلینک باید شبیه این باشه:\n<code>https://t.me/channel/123</code>",
-                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+                              reply_markup=cancel_kb)
+    results = await asyncio.gather(*(check_link(bot, l) for l in links))
+    bad = [(l, r) for l, r in zip(links, results) if r]
+    if bad:
+        txt = "❌ این لینک‌ها مشکل دارن:\n\n" + "\n".join(f"{l}\n↳ {r}" for l, r in bad) + "\n\nلینک‌های درست رو دوباره بفرست."
+        return await m.answer(txt, reply_markup=cancel_kb, disable_web_page_preview=True)
+    busy = [r["link"] for r in await many("SELECT DISTINCT link FROM orders WHERE settled=0 AND link = ANY(?)", (links,))]
+    note = ""
+    if busy:
+        links = [l for l in links if l not in busy]
+        note = ("⚠️ برای این پست‌ها هنوز یه سفارش در حال انجامه، پس حذف شدن:\n" + "\n".join(busy) + "\n\n")
+        if not links:
+            return await m.answer(note + "بعد از تکمیل سفارش قبلی دوباره امتحان کن، یا لینک دیگه‌ای بفرست.",
+                                  reply_markup=cancel_kb, disable_web_page_preview=True)
     await state.update_data(links=links)
     await state.set_state(Order.qty)
     lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
@@ -653,7 +730,7 @@ async def order_links(m: Message, state: FSMContext):
     rows = [[InlineKeyboardButton(text=fmt(q), callback_data=f"qty:{q}") for q in pres[i:i + 2]]
             for i in range(0, len(pres), 2)]
     rows.append(cancel_row())
-    await m.answer(f"✅ {len(links)} پست دریافت شد.\n\n"
+    await m.answer(note + f"✅ {len(links)} پست دریافت شد.\n\n"
                    f"👁 تعداد سین <b>هر پست</b> رو انتخاب کن یا تایپ کن ({fmt(lo)} تا {fmt(hi)}):",
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -719,30 +796,39 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
         await c.message.edit_text("❌ موجودی کافی نیست.")
         return await c.answer()
     await c.message.edit_text("⏳ در حال ثبت سفارش...")
-    done, errors = 0, []
+    done, errors, unknown = 0, [], []
     for link in d["links"]:
-        ok, info = await place_order(uid, link, d["qty"], d["link_cost"])
-        if ok:
+        st, info = await place_order(uid, link, d["qty"], d["link_cost"])
+        if st == "ok":
             done += 1
+        elif st == "unknown":
+            unknown.append(info)
+            await notify_admins(bot, f"🚨 <b>سفارش نامشخص #{info}</b> (کاربر <code>{uid}</code>)\n{link} | {fmt(d['qty'])} سین\n"
+                                     "جواب provider نامعتبر بود یا دیر رسید؛ ممکنه ثبت شده باشه.\n"
+                                     f"اگه توی پنل provider ثبت شده: /resolve {info} شماره_سفارش_provider\n"
+                                     f"اگه ثبت نشده: /refund {info}")
         else:
             errors.append(info)
             await balance_change(uid, d["link_cost"], "refund-failed-order")
+    parts = []
     if done:
-        text = (f"✅ <b>{done} سفارش با موفقیت ثبت شد!</b>\n\n"
-                "🚀 سین‌ها به‌تدریج ارسال می‌شن. پیشرفت رو از «📦 سفارش‌های من» ببین.")
-    else:
-        text = "❌ <b>متأسفانه سفارش ثبت نشد.</b>"
+        parts.append(f"✅ <b>{done} سفارش با موفقیت ثبت شد!</b>\n"
+                     "🚀 سین‌ها به‌تدریج ارسال می‌شن. پیشرفت رو از «📦 سفارش‌های من» ببین.")
+    if unknown:
+        parts.append(f"⏳ <b>{len(unknown)} سفارش در حال بررسیه.</b>\n"
+                     "پاسخ سرویس‌دهنده دیر رسید. نتیجه رو بهت خبر می‌دم؛ اگه ثبت نشده باشه، پولش به کیف پولت برمی‌گرده.")
     if errors:
-        text += (f"\n\n⚠️ {len(errors)} سفارش ثبت نشد و {fmt(len(errors) * d['link_cost'])} تومان به کیف پولت برگشت. "
-                 "لطفاً کمی بعد دوباره تلاش کن یا به پشتیبانی پیام بده.")
+        parts.append(f"⚠️ {len(errors)} سفارش ثبت نشد و {fmt(len(errors) * d['link_cost'])} تومان به کیف پولت برگشت. "
+                     "لطفاً کمی بعد دوباره تلاش کن یا به پشتیبانی پیام بده.")
         await notify_admins(bot, f"⚠️ خطا در ثبت سفارش (کاربر {uid}):\n{html.escape(errors[0][:300])}")
+    text = "\n\n".join(parts)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 سفارش‌های من", callback_data="my_orders")]])
     await c.message.edit_text(text, reply_markup=kb)
     await c.answer()
 
 
 async def show_orders(msg: Message, uid: int, edit=False):
-    for o in await many("SELECT * FROM orders WHERE user_id=? AND settled=0 ORDER BY id DESC LIMIT 10", (uid,)):
+    for o in await many("SELECT * FROM orders WHERE user_id=? AND settled=0 AND provider_order<>'' ORDER BY id DESC LIMIT 10", (uid,)):
         await sync_order(o)
     rows = await many("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
     if not rows:
@@ -790,15 +876,16 @@ async def admin_panel(m: Message, state: FSMContext):
     u = await one("SELECT COUNT(*) n, COALESCE(SUM(balance),0) b FROM users")
     o = await one("SELECT COUNT(*) n, COALESCE(SUM(cost),0) s FROM orders")
     p = await one("SELECT COUNT(*) n FROM topups WHERE status='claimed'")
+    unk = (await one("SELECT COUNT(*) AS n FROM orders WHERE status='Unknown'"))["n"]
     price = await get_setting("price_per_1000")
     await m.answer(
         "🛠 <b>پنل ادمین</b>\n\n"
         f"📊 کاربران: {u['n']} | مجموع موجودی کیف‌پول‌ها: {fmt(u['b'])}\n"
         f"🛒 سفارش‌ها: {o['n']} | فروش: {fmt(o['s'])}\n"
-        f"🕓 رسید در انتظار: {p['n']}\n💵 قیمت هر ۱۰۰۰: {fmt(price)}\n\n"
+        f"🕓 رسید در انتظار: {p['n']}\n⚠️ سفارش نامشخص: {unk}\n💵 قیمت هر ۱۰۰۰: {fmt(price)}\n\n"
         "<b>دستورات:</b>\n/user آیدی یا @یوزرنیم\n/pending رسیدهای در انتظار\n/add id مبلغ\n/sub id مبلغ\n"
         "/ban id\n/unban id\n/price مبلغ\n/card متن کارت\n/limits حداقل حداکثر\n"
-        "/support @آیدی\n/brand نام ربات\n/provider موجودی provider\n/broadcast متن",
+        "/support @آیدی\n/brand نام ربات\n/provider موجودی provider\n/unknown سفارش‌های نامشخص\n/resolve id شماره\n/refund id\n/broadcast متن",
         reply_markup=ADMIN_KB)
 
 
@@ -1041,6 +1128,46 @@ async def adm_provider(c: CallbackQuery):
     await c.message.answer(await provider_balance_text())
 
 
+@router.message(Command("unknown"), IS_ADMIN)
+async def cmd_unknown(m: Message):
+    rows = await many("SELECT * FROM orders WHERE status='Unknown' ORDER BY id")
+    if not rows:
+        return await m.answer("سفارش نامشخصی نیست ✅")
+    for o in rows:
+        await m.answer(f"#{o['id']} • کاربر <code>{o['user_id']}</code> • {fmt(o['quantity'])} سین\n{o['link']}\n"
+                       f"/resolve {o['id']} شماره_provider\n/refund {o['id']}", disable_web_page_preview=True)
+
+
+@router.message(Command("resolve"), IS_ADMIN)
+async def cmd_resolve(m: Message, command: CommandObject, bot: Bot):
+    parts = (command.args or "").split()
+    oid = to_int(parts[0]) if parts else None
+    if len(parts) < 2 or not oid:
+        return await m.answer("فرمت: /resolve شماره_سفارش شماره_سفارش_provider")
+    cur = await db.execute("UPDATE orders SET provider_order=?, status='Pending' WHERE id=? AND status='Unknown'", (parts[1], oid))
+    if cur.rowcount != 1:
+        return await m.answer("این سفارش پیدا نشد یا دیگه نامشخص نیست.")
+    o = await one("SELECT * FROM orders WHERE id=?", (oid,))
+    await m.answer("✅ ثبت شد و از حالا وضعیتش پیگیری می‌شه.")
+    with suppress(Exception):
+        await bot.send_message(o["user_id"], f"✅ سفارش #{oid} تایید شد و در حال انجامه.")
+
+
+@router.message(Command("refund"), IS_ADMIN)
+async def cmd_refund(m: Message, command: CommandObject, bot: Bot):
+    oid = to_int(command.args)
+    if not oid:
+        return await m.answer("فرمت: /refund شماره_سفارش")
+    cur = await db.execute("UPDATE orders SET status='Canceled', settled=1 WHERE id=? AND status='Unknown'", (oid,))
+    if cur.rowcount != 1:
+        return await m.answer("این سفارش پیدا نشد یا دیگه نامشخص نیست.")
+    o = await one("SELECT * FROM orders WHERE id=?", (oid,))
+    await balance_change(o["user_id"], o["cost"], f"refund-order-{oid}")
+    await m.answer(f"✅ {fmt(o['cost'])} تومان به کاربر برگشت.")
+    with suppress(Exception):
+        await bot.send_message(o["user_id"], f"ℹ️ سفارش #{oid} ثبت نشد و {fmt(o['cost'])} تومان به کیف پولت برگشت.")
+
+
 @router.message(Command("broadcast"), IS_ADMIN)
 async def cmd_broadcast(m: Message, command: CommandObject, bot: Bot):
     if not command.args:
@@ -1064,16 +1191,37 @@ async def receipt_in(m: Message, bot: Bot):
     t = await one("SELECT * FROM topups WHERE user_id=? AND status='awaiting' ORDER BY id DESC LIMIT 1", (m.from_user.id,))
     if not t:
         return
-    cur = await db.execute("UPDATE topups SET status='claimed' WHERE id=? AND status='awaiting'", (t["id"],))
-    await db.commit()
+    key = None
+    if m.photo:
+        key = m.photo[-1].file_unique_id
+    elif m.document:
+        key = m.document.file_unique_id
+    elif m.text and len(m.text.strip()) >= 6:
+        key = "t:" + m.text.strip().lower()
+    dup = await one("SELECT id, status FROM topups WHERE receipt_uid=? AND id<>? LIMIT 1", (key, t["id"])) if key else None
+    cur = await db.execute("UPDATE topups SET status='claimed', receipt_uid=? WHERE id=? AND status='awaiting'", (key, t["id"]))
     if cur.rowcount != 1:
         return
+    warn = (f"🚨 <b>هشدار: این رسید قبلاً برای درخواست #{dup['id']} ({dup['status']}) ثبت شده!</b>\n\n" if dup else "")
     for a in ADMIN_IDS:
         with suppress(Exception):
             cp = await bot.copy_message(chat_id=a, from_chat_id=m.chat.id, message_id=m.message_id)
-            await bot.send_message(a, "🧾 <b>رسید بالا</b> مربوط به این پرداخته:\n\n" + admin_topup_text(t, m.from_user.username),
+            await bot.send_message(a, warn + "🧾 <b>رسید بالا</b> مربوط به این پرداخته:\n\n" + admin_topup_text(t, m.from_user.username),
                                    reply_markup=admin_topup_kb(t["id"]), reply_to_message_id=cp.message_id)
     await m.answer("✅ <b>رسیدت ثبت و برای ادمین ارسال شد.</b>\nبعد از تایید، کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم 🙏")
+
+
+@router.errors()
+async def on_error(event: ErrorEvent, bot: Bot):
+    logging.error("handler error", exc_info=event.exception)
+    await report_error(bot, "handler", event.exception)
+    upd = event.update
+    with suppress(Exception):
+        if upd.message:
+            await upd.message.answer("⚠️ یه خطای موقت پیش اومد. لطفاً دوباره امتحان کن.")
+        elif upd.callback_query:
+            await upd.callback_query.answer("⚠️ خطای موقت؛ دوباره امتحان کن", show_alert=True)
+    return True
 
 
 # ───────────────────────── اجرا ─────────────────────────
