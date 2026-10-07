@@ -30,6 +30,7 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 PROVIDER_URL = os.getenv("PROVIDER_URL", "")
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 SERVICE_ID = os.getenv("SERVICE_ID", "")
+PROVIDER_METHOD = os.getenv("PROVIDER_METHOD", "GET").upper()  # GET یا POST
 FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "")  # مثلا @mychannel ، خالی = غیرفعال
 DATABASE_URL = os.environ["DATABASE_URL"]
 MIN_TOPUP = int(os.getenv("MIN_TOPUP", "10000"))
@@ -175,7 +176,8 @@ def to_int(s):
 async def provider(**params):
     data = {"key": PROVIDER_KEY, **params}
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
-        async with s.post(PROVIDER_URL, data=data) as r:
+        req = s.post(PROVIDER_URL, data=data) if PROVIDER_METHOD == "POST" else s.get(PROVIDER_URL, params=data)
+        async with req as r:
             return await r.json(content_type=None)
 
 
