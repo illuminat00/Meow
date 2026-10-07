@@ -69,6 +69,8 @@ MENU = ReplyKeyboardMarkup(
     input_field_placeholder="از منوی پایین انتخاب کن 👇",
 )
 
+MENU_TEXTS = {BTN_ORDER, BTN_CHARGE, BTN_ACC, BTN_ORDERS, BTN_SUPPORT, BTN_HELP}
+
 router = Router()
 IS_ADMIN = F.from_user.id.in_(ADMIN_IDS)
 db = None  # در init_db ساخته می‌شه
@@ -268,6 +270,10 @@ class Guard(BaseMiddleware):
                          (user.id, user.username, int(time.time())))
         await db.execute("UPDATE users SET username=? WHERE id=?", (user.username, user.id))
         await db.commit()
+        # زدن هر دکمه‌ی منو، فرایند نیمه‌کاره (شارژ، سفارش، رسید...) رو ریست می‌کنه
+        if isinstance(event, Message) and event.text in MENU_TEXTS and data.get("state") is not None:
+            await data["state"].clear()
+            data["raw_state"] = None
         if user.id in ADMIN_IDS:
             return await handler(event, data)
         u = await one("SELECT banned FROM users WHERE id=?", (user.id,))
@@ -386,6 +392,15 @@ class Charge(StatesGroup):
 
 
 class AdminEdit(StatesGroup):
+    amount = State()
+
+
+class Receipt(StatesGroup):
+    wait = State()
+
+
+class AdminUser(StatesGroup):
+    find = State()
     amount = State()
 
 
@@ -527,7 +542,7 @@ def admin_topup_text(t, username):
 
 
 @router.callback_query(F.data.startswith("paid:"))
-async def topup_paid(c: CallbackQuery, bot: Bot):
+async def topup_paid(c: CallbackQuery, state: FSMContext, bot: Bot):
     tid = int(c.data.split(":")[1])
     cur = await db.execute("UPDATE topups SET status='claimed' WHERE id=? AND user_id=? AND status='pending'",
                            (tid, c.from_user.id))
@@ -535,11 +550,41 @@ async def topup_paid(c: CallbackQuery, bot: Bot):
     if cur.rowcount != 1:
         return await c.answer("این درخواست دیگه فعال نیست.", show_alert=True)
     t = await one("SELECT * FROM topups WHERE id=?", (tid,))
-    await c.message.edit_text("✅ <b>ثبت شد!</b>\n\nبعد از تایید ادمین (معمولاً چند دقیقه) کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم 🙏")
+    await state.set_state(Receipt.wait)
+    await state.update_data(tid=tid)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏭ لازم نیست", callback_data="rcpt_skip")]])
+    await c.message.edit_text(
+        "✅ <b>پرداختت ثبت شد!</b>\n\n"
+        "بعد از تایید ادمین (معمولاً چند دقیقه) کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم.\n\n"
+        "🧾 برای تایید سریع‌تر، <b>رسید پرداخت</b> (عکس یا شماره پیگیری) رو همین‌جا بفرست.",
+        reply_markup=kb)
     for a in ADMIN_IDS:
         with suppress(Exception):
             await bot.send_message(a, admin_topup_text(t, c.from_user.username), reply_markup=admin_topup_kb(tid))
     await c.answer()
+
+
+@router.callback_query(F.data == "rcpt_skip")
+async def receipt_skip(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    with suppress(Exception):
+        await c.message.edit_text("باشه 👍 پرداختت ثبت شده و بعد از بررسی، کیف پولت شارژ می‌شه.")
+    await c.answer()
+
+
+@router.message(Receipt.wait, F.photo | F.document | F.text)
+async def receipt_in(m: Message, state: FSMContext, bot: Bot):
+    tid = (await state.get_data()).get("tid")
+    t = await one("SELECT * FROM topups WHERE id=? AND user_id=?", (tid, m.from_user.id)) if tid else None
+    await state.clear()
+    if not t or t["status"] not in ("claimed", "pending"):
+        return await m.answer("این پرداخت دیگه فعال نیست.")
+    for a in ADMIN_IDS:
+        with suppress(Exception):
+            cp = await bot.copy_message(chat_id=a, from_chat_id=m.chat.id, message_id=m.message_id)
+            await bot.send_message(a, "🧾 <b>رسید بالا</b> مربوط به این پرداخته:\n\n" + admin_topup_text(t, m.from_user.username),
+                                   reply_markup=admin_topup_kb(tid), reply_to_message_id=cp.message_id)
+    await m.answer("✅ رسیدت برای ادمین ارسال شد. بعد از بررسی، کیف پولت شارژ می‌شه و بهت خبر می‌دم 🙏")
 
 
 async def approve_topup(tid, amount=None):
@@ -763,28 +808,171 @@ async def orders_refresh(c: CallbackQuery):
 
 
 # ───────────────────────── پنل ادمین ─────────────────────────
+ADMIN_KB = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="👤 مدیریت و شارژ کاربر", callback_data="adm_user")],
+    [InlineKeyboardButton(text="📋 رسیدهای در انتظار", callback_data="adm_pending"),
+     InlineKeyboardButton(text="💼 موجودی provider", callback_data="adm_provider")],
+])
+
+
 @router.message(Command("admin"), IS_ADMIN)
-async def admin_panel(m: Message):
+async def admin_panel(m: Message, state: FSMContext):
+    await state.clear()
     u = await one("SELECT COUNT(*) n, COALESCE(SUM(balance),0) b FROM users")
     o = await one("SELECT COUNT(*) n, COALESCE(SUM(cost),0) s FROM orders")
     p = await one("SELECT COUNT(*) n FROM topups WHERE status='claimed'")
     price = await get_setting("price_per_1000")
     await m.answer(
-        f"📊 کاربران: {u['n']} | مجموع موجودی کیف‌پول‌ها: {u['b']:,}\n"
-        f"🛒 سفارش‌ها: {o['n']} | فروش: {o['s']:,}\n"
-        f"🕓 رسید در انتظار: {p['n']}\n💵 قیمت هر ۱۰۰۰: {int(price):,}\n\n"
-        "<b>دستورات:</b>\n/pending رسیدهای در انتظار\n/add id مبلغ\n/sub id مبلغ\n/ban id\n/unban id\n"
-        "/price مبلغ\n/card متن کارت\n/limits حداقل حداکثر\n/support @آیدی\n/brand نام ربات\n"
-        "/provider موجودی provider\n/broadcast متن")
+        "🛠 <b>پنل ادمین</b>\n\n"
+        f"📊 کاربران: {u['n']} | مجموع موجودی کیف‌پول‌ها: {fmt(u['b'])}\n"
+        f"🛒 سفارش‌ها: {o['n']} | فروش: {fmt(o['s'])}\n"
+        f"🕓 رسید در انتظار: {p['n']}\n💵 قیمت هر ۱۰۰۰: {fmt(price)}\n\n"
+        "<b>دستورات:</b>\n/user آیدی یا @یوزرنیم\n/pending رسیدهای در انتظار\n/add id مبلغ\n/sub id مبلغ\n"
+        "/ban id\n/unban id\n/price مبلغ\n/card متن کارت\n/limits حداقل حداکثر\n"
+        "/support @آیدی\n/brand نام ربات\n/provider موجودی provider\n/broadcast متن",
+        reply_markup=ADMIN_KB)
+
+
+# ── مدیریت کاربر و شارژ دستی کیف پول
+async def find_user(q):
+    q = (q or "").strip()
+    n = to_int(q)
+    if n:
+        return await one("SELECT * FROM users WHERE id=?", (n,))
+    return await one("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (q.lstrip("@"),))
+
+
+async def user_card(u):
+    st = await one("SELECT COUNT(*) AS n, COALESCE(SUM(cost),0) AS s FROM orders WHERE user_id=?", (u["id"],))
+    last = await many("SELECT amount, reason, ts FROM ledger WHERE user_id=? ORDER BY id DESC LIMIT 5", (u["id"],))
+    hist = "\n".join(
+        f"{r['amount']:+,} • {html.escape(r['reason'])} • {time.strftime('%m/%d %H:%M', time.gmtime(r['ts'] + 12600))}"
+        for r in last) or "—"
+    return ("👤 <b>اطلاعات کاربر</b>\n\n"
+            f"🆔 <code>{u['id']}</code>\n"
+            f"🔗 {('@' + html.escape(u['username'])) if u['username'] else '-'}\n"
+            f"💰 موجودی: <b>{fmt(u['balance'])}</b> تومان\n"
+            f"📦 سفارش‌ها: {st['n']} | مجموع خرید: {fmt(st['s'])} تومان\n"
+            f"🚦 وضعیت: {'🚫 بن‌شده' if u['banned'] else '✅ فعال'}\n\n"
+            f"🕓 <b>آخرین تراکنش‌ها:</b>\n{hist}")
+
+
+def user_kb(u):
+    uid = u["id"]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ شارژ کیف پول", callback_data=f"au_add:{uid}"),
+         InlineKeyboardButton(text="➖ کسر", callback_data=f"au_sub:{uid}")],
+        [InlineKeyboardButton(text="✅ رفع بن" if u["banned"] else "🚫 بن کاربر", callback_data=f"au_ban:{uid}")]])
+
+
+@router.callback_query(F.data == "adm_user", IS_ADMIN)
+async def adm_user(c: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminUser.find)
+    await c.message.answer("🔎 آیدی عددی یا @یوزرنیم کاربر رو بفرست.\n(کاربر باید قبلاً ربات رو استارت کرده باشه)",
+                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    await c.answer()
+
+
+@router.message(AdminUser.find, IS_ADMIN, F.text)
+async def adm_find(m: Message, state: FSMContext):
+    u = await find_user(m.text)
+    if not u:
+        return await m.answer("کاربری پیدا نشد 🤔 دوباره آیدی یا یوزرنیم رو بفرست:",
+                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    await state.clear()
+    await m.answer(await user_card(u), reply_markup=user_kb(u))
+
+
+@router.message(Command("user"), IS_ADMIN)
+async def cmd_user(m: Message, command: CommandObject, state: FSMContext):
+    await state.clear()
+    u = await find_user(command.args)
+    if not u:
+        return await m.answer("فرمت: /user آیدی یا @یوزرنیم (کاربر باید ربات رو استارت کرده باشه)")
+    await m.answer(await user_card(u), reply_markup=user_kb(u))
+
+
+@router.callback_query(F.data.regexp(r"^au_(add|sub):\d+$"), IS_ADMIN)
+async def au_start(c: CallbackQuery, state: FSMContext):
+    mode, uid = c.data[3:].split(":")
+    await state.set_state(AdminUser.amount)
+    await state.update_data(mode=mode, uid=int(uid))
+    title = "➕ شارژ" if mode == "add" else "➖ کسر"
+    await c.message.answer(f"{title} کیف پول <code>{uid}</code>\nمبلغ (تومان) رو بفرست:",
+                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    await c.answer()
+
+
+@router.message(AdminUser.amount, IS_ADMIN, F.text)
+async def au_amount(m: Message, state: FSMContext):
+    amt = to_int(m.text)
+    if not amt:
+        return await m.answer("عدد معتبر بفرست:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    d = await state.get_data()
+    await state.update_data(amt=amt)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ تایید", callback_data="au_ok"),
+        InlineKeyboardButton(text="❌ لغو", callback_data="au_no")]])
+    verb = "شارژ" if d["mode"] == "add" else "کسر"
+    await m.answer(f"{verb} <b>{fmt(amt)}</b> تومان برای کاربر <code>{d['uid']}</code>؟", reply_markup=kb)
+
+
+@router.callback_query(F.data == "au_no", IS_ADMIN)
+async def au_no(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    with suppress(Exception):
+        await c.message.edit_text("لغو شد.")
+    await c.answer()
+
+
+@router.callback_query(F.data == "au_ok", IS_ADMIN)
+async def au_ok(c: CallbackQuery, state: FSMContext, bot: Bot):
+    d = await state.get_data()
+    await state.clear()
+    if not d.get("uid") or not d.get("amt"):
+        return await c.answer("این درخواست منقضی شده.", show_alert=True)
+    uid, amt = d["uid"], d["amt"]
+    if d["mode"] == "add":
+        await balance_change(uid, amt, f"admin-add-{c.from_user.id}")
+        with suppress(Exception):
+            await bot.send_message(uid, f"💰 <b>{fmt(amt)}</b> تومان به کیف پولت اضافه شد.")
+    elif not await try_spend(uid, amt, f"admin-sub-{c.from_user.id}"):
+        await c.message.edit_text("❌ موجودی کاربر کمتر از این مبلغه.")
+        return await c.answer()
+    u = await one("SELECT * FROM users WHERE id=?", (uid,))
+    await c.message.edit_text("✅ انجام شد.\n\n" + await user_card(u), reply_markup=user_kb(u))
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("au_ban:"), IS_ADMIN)
+async def au_ban(c: CallbackQuery):
+    uid = int(c.data.split(":")[1])
+    u = await one("SELECT * FROM users WHERE id=?", (uid,))
+    if not u:
+        return await c.answer("کاربر پیدا نشد.", show_alert=True)
+    await db.execute("UPDATE users SET banned=? WHERE id=?", (0 if u["banned"] else 1, uid))
+    u = await one("SELECT * FROM users WHERE id=?", (uid,))
+    await c.message.edit_text(await user_card(u), reply_markup=user_kb(u))
+    await c.answer("انجام شد ✅")
+
+
+async def send_pending(msg: Message):
+    rows = await many("SELECT t.*, u.username FROM topups t LEFT JOIN users u ON u.id=t.user_id WHERE t.status='claimed'")
+    if not rows:
+        return await msg.answer("رسید در انتظاری نیست ✅")
+    for t in rows:
+        await msg.answer(admin_topup_text(t, t["username"]), reply_markup=admin_topup_kb(t["id"]))
 
 
 @router.message(Command("pending"), IS_ADMIN)
 async def pending(m: Message):
-    rows = await many("SELECT t.*, u.username FROM topups t LEFT JOIN users u ON u.id=t.user_id WHERE t.status='claimed'")
-    if not rows:
-        return await m.answer("رسید در انتظاری نیست.")
-    for t in rows:
-        await m.answer(admin_topup_text(t, t["username"]), reply_markup=admin_topup_kb(t["id"]))
+    await send_pending(m)
+
+
+@router.callback_query(F.data == "adm_pending", IS_ADMIN)
+async def adm_pending(c: CallbackQuery):
+    await c.answer()
+    await send_pending(c.message)
 
 
 async def _id_amount(command: CommandObject):
@@ -865,13 +1053,23 @@ async def cmd_limits(m: Message, command: CommandObject):
     await m.answer("✅ انجام شد.")
 
 
-@router.message(Command("provider"), IS_ADMIN)
-async def cmd_provider(m: Message):
+async def provider_balance_text():
     try:
         res = await provider(action="balance")
-        await m.answer(f"💼 موجودی provider: {res.get('balance')} {res.get('currency', '')}")
+        return f"💼 موجودی provider: {res.get('balance')} {res.get('currency', '')}"
     except Exception as e:
-        await m.answer(f"خطا: {html.escape(str(e))}")
+        return f"خطا: {html.escape(str(e))}"
+
+
+@router.message(Command("provider"), IS_ADMIN)
+async def cmd_provider(m: Message):
+    await m.answer(await provider_balance_text())
+
+
+@router.callback_query(F.data == "adm_provider", IS_ADMIN)
+async def adm_provider(c: CallbackQuery):
+    await c.answer()
+    await c.message.answer(await provider_balance_text())
 
 
 @router.message(Command("broadcast"), IS_ADMIN)
