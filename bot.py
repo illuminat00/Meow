@@ -14,7 +14,7 @@ import asyncpg
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -395,10 +395,6 @@ class AdminEdit(StatesGroup):
     amount = State()
 
 
-class Receipt(StatesGroup):
-    wait = State()
-
-
 class AdminUser(StatesGroup):
     find = State()
     amount = State()
@@ -433,7 +429,7 @@ def topup_kb(tid):
 async def make_unique_amount(base):
     now = int(time.time())
     used = {r[0] for r in await many(
-        "SELECT unique_amount FROM topups WHERE status='claimed' OR (status='pending' AND expires>?)", (now,))}
+        "SELECT unique_amount FROM topups WHERE status='claimed' OR (status IN ('pending','awaiting') AND expires>?)", (now,))}
     nums = list(range(RAND_MIN, RAND_MAX + 1))
     random.shuffle(nums)
     for n in nums:
@@ -443,13 +439,15 @@ async def make_unique_amount(base):
 
 
 async def get_open_topup(uid):
-    return await one("SELECT * FROM topups WHERE user_id=? AND (status='claimed' OR (status='pending' AND expires>?))",
+    return await one("SELECT * FROM topups WHERE user_id=? AND (status='claimed' OR (status IN ('pending','awaiting') AND expires>?))",
                      (uid, int(time.time())))
 
 
 async def show_open_topup(msg: Message, t):
     if t["status"] == "claimed":
         return await msg.answer("⏳ رسید قبلی‌ت در انتظار تاییده. بعد از تایید می‌تونی دوباره شارژ کنی.")
+    if t["status"] == "awaiting":
+        return await msg.answer("🧾 منتظر رسید پرداختت هستم!\nعکس رسید یا شماره پیگیری رو همین‌جا بفرست.")
     return await msg.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
 
 
@@ -542,53 +540,24 @@ def admin_topup_text(t, username):
 
 
 @router.callback_query(F.data.startswith("paid:"))
-async def topup_paid(c: CallbackQuery, state: FSMContext, bot: Bot):
+async def topup_paid(c: CallbackQuery):
     tid = int(c.data.split(":")[1])
-    cur = await db.execute("UPDATE topups SET status='claimed' WHERE id=? AND user_id=? AND status='pending'",
-                           (tid, c.from_user.id))
+    cur = await db.execute("UPDATE topups SET status='awaiting', expires=? WHERE id=? AND user_id=? AND status='pending'",
+                           (int(time.time()) + TOPUP_TTL, tid, c.from_user.id))
     await db.commit()
     if cur.rowcount != 1:
         return await c.answer("این درخواست دیگه فعال نیست.", show_alert=True)
     t = await one("SELECT * FROM topups WHERE id=?", (tid,))
-    await state.set_state(Receipt.wait)
-    await state.update_data(tid=tid)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏭ لازم نیست", callback_data="rcpt_skip")]])
     await c.message.edit_text(
-        "✅ <b>پرداختت ثبت شد!</b>\n\n"
-        "بعد از تایید ادمین (معمولاً چند دقیقه) کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم.\n\n"
-        "🧾 برای تایید سریع‌تر، <b>رسید پرداخت</b> (عکس یا شماره پیگیری) رو همین‌جا بفرست.",
-        reply_markup=kb)
-    for a in ADMIN_IDS:
-        with suppress(Exception):
-            await bot.send_message(a, admin_topup_text(t, c.from_user.username), reply_markup=admin_topup_kb(tid))
+        "🧾 <b>حالا رسید پرداخت رو بفرست</b>\n\n"
+        "عکس رسید (یا شماره پیگیری) رو همین‌جا بفرست تا برای ادمین ارسال بشه. "
+        "بعد از تایید، کیف پولت شارژ می‌شه و بهت خبر می‌دم.\n\n"
+        f"💰 مبلغ واریزی: <code>{t['unique_amount']}</code> تومان")
     await c.answer()
-
-
-@router.callback_query(F.data == "rcpt_skip")
-async def receipt_skip(c: CallbackQuery, state: FSMContext):
-    await state.clear()
-    with suppress(Exception):
-        await c.message.edit_text("باشه 👍 پرداختت ثبت شده و بعد از بررسی، کیف پولت شارژ می‌شه.")
-    await c.answer()
-
-
-@router.message(Receipt.wait, F.photo | F.document | F.text)
-async def receipt_in(m: Message, state: FSMContext, bot: Bot):
-    tid = (await state.get_data()).get("tid")
-    t = await one("SELECT * FROM topups WHERE id=? AND user_id=?", (tid, m.from_user.id)) if tid else None
-    await state.clear()
-    if not t or t["status"] not in ("claimed", "pending"):
-        return await m.answer("این پرداخت دیگه فعال نیست.")
-    for a in ADMIN_IDS:
-        with suppress(Exception):
-            cp = await bot.copy_message(chat_id=a, from_chat_id=m.chat.id, message_id=m.message_id)
-            await bot.send_message(a, "🧾 <b>رسید بالا</b> مربوط به این پرداخته:\n\n" + admin_topup_text(t, m.from_user.username),
-                                   reply_markup=admin_topup_kb(tid), reply_to_message_id=cp.message_id)
-    await m.answer("✅ رسیدت برای ادمین ارسال شد. بعد از بررسی، کیف پولت شارژ می‌شه و بهت خبر می‌دم 🙏")
 
 
 async def approve_topup(tid, amount=None):
-    cur = await db.execute("UPDATE topups SET status='approved' WHERE id=? AND status IN ('pending','claimed')", (tid,))
+    cur = await db.execute("UPDATE topups SET status='approved' WHERE id=? AND status IN ('pending','awaiting','claimed')", (tid,))
     await db.commit()
     if cur.rowcount != 1:
         return None
@@ -615,7 +584,7 @@ async def tc_ok(c: CallbackQuery, bot: Bot):
 @router.callback_query(F.data.startswith("tc_no:"), IS_ADMIN)
 async def tc_no(c: CallbackQuery, bot: Bot):
     tid = int(c.data.split(":")[1])
-    cur = await db.execute("UPDATE topups SET status='rejected' WHERE id=? AND status IN ('pending','claimed')", (tid,))
+    cur = await db.execute("UPDATE topups SET status='rejected' WHERE id=? AND status IN ('pending','awaiting','claimed')", (tid,))
     await db.commit()
     if cur.rowcount != 1:
         return await c.answer("قبلاً بررسی شده.", show_alert=True)
@@ -1085,6 +1054,26 @@ async def cmd_broadcast(m: Message, command: CommandObject, bot: Bot):
             pass
         await asyncio.sleep(0.05)
     await m.answer(f"✅ برای {sent} نفر ارسال شد.")
+
+
+# ───────────────────────── دریافت رسید (باید آخرین هندلر باشه) ─────────────────────────
+@router.message(StateFilter(None), F.photo | F.document | F.text)
+async def receipt_in(m: Message, bot: Bot):
+    if m.text and m.text.startswith("/"):
+        return
+    t = await one("SELECT * FROM topups WHERE user_id=? AND status='awaiting' ORDER BY id DESC LIMIT 1", (m.from_user.id,))
+    if not t:
+        return
+    cur = await db.execute("UPDATE topups SET status='claimed' WHERE id=? AND status='awaiting'", (t["id"],))
+    await db.commit()
+    if cur.rowcount != 1:
+        return
+    for a in ADMIN_IDS:
+        with suppress(Exception):
+            cp = await bot.copy_message(chat_id=a, from_chat_id=m.chat.id, message_id=m.message_id)
+            await bot.send_message(a, "🧾 <b>رسید بالا</b> مربوط به این پرداخته:\n\n" + admin_topup_text(t, m.from_user.username),
+                                   reply_markup=admin_topup_kb(t["id"]), reply_to_message_id=cp.message_id)
+    await m.answer("✅ <b>رسیدت ثبت و برای ادمین ارسال شد.</b>\nبعد از تایید، کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم 🙏")
 
 
 # ───────────────────────── اجرا ─────────────────────────
