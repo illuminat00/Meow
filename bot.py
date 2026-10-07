@@ -45,6 +45,8 @@ DEFAULTS = {
     "card": f"{os.getenv('CARD_NUMBER', '0000-0000-0000-0000')}\nبه نام: {os.getenv('CARD_HOLDER', '---')}",
     "min_qty": "100",
     "max_qty": "100000",
+    "brand": os.getenv("BRAND_NAME", "Nexor"),
+    "support": os.getenv("SUPPORT_USERNAME", ""),
 }
 
 LINK_RE = re.compile(r"https?://t\.me/(?:c/)?[A-Za-z0-9_]+/\d+")
@@ -56,12 +58,15 @@ STATUS_FA = {
 }
 REFUND_STATUSES = {"Canceled", "Cancelled", "Refunded", "Fail", "Failed"}
 
-BTN_ORDER, BTN_CHARGE, BTN_ACC, BTN_ORDERS = "🛒 ثبت سفارش سین", "💰 شارژ کیف پول", "👤 حساب من", "📦 سفارش‌های من"
+BTN_ORDER, BTN_CHARGE, BTN_ACC = "🛒 ثبت سفارش سین", "💰 شارژ کیف پول", "👤 حساب من"
+BTN_ORDERS, BTN_SUPPORT, BTN_HELP = "📦 سفارش‌های من", "💬 پشتیبانی", "📖 راهنما و قوانین"
 MENU = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_ORDER)],
               [KeyboardButton(text=BTN_CHARGE), KeyboardButton(text=BTN_ACC)],
-              [KeyboardButton(text=BTN_ORDERS)]],
+              [KeyboardButton(text=BTN_ORDERS), KeyboardButton(text=BTN_SUPPORT)],
+              [KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
+    input_field_placeholder="از منوی پایین انتخاب کن 👇",
 )
 
 router = Router()
@@ -288,18 +293,44 @@ class Guard(BaseMiddleware):
 
 
 # ───────────────────────── منو و حساب ─────────────────────────
-WELCOME = "سلام 👋 به ربات فروش سین خوش اومدی.\nاز منوی پایین انتخاب کن:"
+def fmt(n):
+    return f"{int(n):,}"
+
+
+def cancel_row():
+    return [InlineKeyboardButton(text="❌ انصراف", callback_data="flow_cancel")]
+
+
+async def welcome_text(user):
+    brand = html.escape(await get_setting("brand"))
+    price = int(await get_setting("price_per_1000"))
+    bal = (await one("SELECT balance FROM users WHERE id=?", (user.id,)))["balance"]
+    return (f"سلام {html.escape(user.first_name or 'دوست عزیز')} 👋\n"
+            f"به <b>{brand}</b> خوش اومدی!\n\n"
+            "اینجا می‌تونی خیلی سریع و خودکار برای پست‌های کانالت <b>سین (بازدید)</b> سفارش بدی؛ "
+            "بدون معطلی و بدون پیام دادن به پشتیبان.\n\n"
+            f"💵 قیمت هر ۱۰۰۰ سین: <b>{fmt(price)}</b> تومان\n"
+            f"👛 موجودی تو: <b>{fmt(bal)}</b> تومان\n\n"
+            "از منوی پایین شروع کن 👇")
 
 
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
-    await m.answer(WELCOME, reply_markup=MENU)
+    await m.answer(await welcome_text(m.from_user), reply_markup=MENU)
 
 
 @router.callback_query(F.data == "chk_join")
 async def chk_join(c: CallbackQuery):
-    await c.message.answer(WELCOME, reply_markup=MENU)
+    await c.message.answer(await welcome_text(c.from_user), reply_markup=MENU)
+    await c.answer()
+
+
+@router.callback_query(F.data == "flow_cancel")
+async def flow_cancel(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    with suppress(Exception):
+        await c.message.edit_text("انصراف داده شد 🌿\nهر وقت خواستی از منوی پایین ادامه بده.")
     await c.answer()
 
 
@@ -307,7 +338,46 @@ async def chk_join(c: CallbackQuery):
 async def account(m: Message, state: FSMContext):
     await state.clear()
     u = await one("SELECT * FROM users WHERE id=?", (m.from_user.id,))
-    await m.answer(f"🆔 شناسه: <code>{u['id']}</code>\n💰 موجودی: <b>{u['balance']:,}</b> تومان")
+    n = (await one("SELECT COUNT(*) AS n FROM orders WHERE user_id=?", (m.from_user.id,)))["n"]
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 شارژ کیف پول", callback_data="go_charge")]])
+    await m.answer("👤 <b>حساب من</b>\n\n"
+                   f"🆔 شناسه: <code>{u['id']}</code>\n"
+                   f"💰 موجودی: <b>{fmt(u['balance'])}</b> تومان\n"
+                   f"📦 تعداد سفارش‌ها: {n}", reply_markup=kb)
+
+
+HELP_TEXT = (
+    "📖 <b>راهنمای استفاده</b>\n\n"
+    "1️⃣ از «💰 شارژ کیف پول» حسابت رو شارژ کن.\n"
+    "2️⃣ «🛒 ثبت سفارش سین» رو بزن و لینک پست‌ها رو بفرست.\n"
+    "3️⃣ تعداد سین هر پست رو انتخاب کن و سفارش رو تایید کن.\n"
+    "4️⃣ پیشرفت کار رو از «📦 سفارش‌های من» ببین.\n\n"
+    "📜 <b>قوانین مهم</b>\n"
+    "• کانال باید <b>عمومی (Public)</b> باشه و تا پایان سفارش خصوصی نشه.\n"
+    "• تا کامل شدن سفارش، برای همون پست سفارش دوم ثبت نکن.\n"
+    "• لینک رو دقیق بفرست؛ لینک اشتباه ممکنه باعث انجام نشدن سفارش بشه.\n"
+    "• اگه سفارشی لغو بشه یا ناقص بمونه، هزینه‌ی بخش انجام‌نشده خودکار به کیف پولت برمی‌گرده.\n"
+    "• برای تایید سریع‌تر شارژ، دقیقاً همون مبلغی که ربات نشون می‌ده رو واریز کن.\n"
+    "• زمان رسیدن سین‌ها بسته به سرویس و شرایط تلگرام ممکنه کمی متفاوت باشه."
+)
+
+
+@router.message(F.text == BTN_HELP)
+async def help_cmd(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer(HELP_TEXT)
+
+
+@router.message(F.text == BTN_SUPPORT)
+async def support(m: Message, state: FSMContext):
+    await state.clear()
+    sup = (await get_setting("support")).strip().lstrip("@")
+    if not sup:
+        return await m.answer("💬 پشتیبانی هنوز تنظیم نشده. لطفاً کمی بعد دوباره سر بزن 🙏")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 پیام به پشتیبانی", url=f"https://t.me/{sup}")]])
+    await m.answer("💬 <b>پشتیبانی</b>\n\n"
+                   "هر سوال یا مشکلی داشتی، با پشتیبانی در ارتباط باش.\n"
+                   "موقع پیام دادن، شناسه‌ی حسابت رو هم بفرست تا سریع‌تر پیگیری کنیم.", reply_markup=kb)
 
 
 # ───────────────────────── شارژ کیف پول ─────────────────────────
@@ -319,17 +389,23 @@ class AdminEdit(StatesGroup):
     amount = State()
 
 
+PRESETS = [50000, 100000, 200000, 500000]
+
+
 async def topup_text(t):
-    card = await get_setting("card")
+    card = (await get_setting("card")).strip().split("\n", 1)
+    card_html = f"<code>{html.escape(card[0])}</code>" + (f"\n{html.escape(card[1])}" if len(card) > 1 else "")
     left = max(0, (t["expires"] - int(time.time())) // 60)
+    note = "" if CREDIT_FULL else (
+        f"\n📌 مبلغ <b>{fmt(t['base'])}</b> تومان به کیف پولت اضافه می‌شه؛ عدد اضافه‌ی آخر فقط برای شناسایی پرداخته.\n")
     return (
-        "💳 برای شارژ، <b>دقیقاً</b> مبلغ زیر رو کارت‌به‌کارت کن:\n\n"
-        f"💰 مبلغ: <code>{t['unique_amount']}</code> تومان ({t['unique_amount']:,})\n\n"
-        f"🏦 کارت:\n<code>{html.escape(card)}</code>\n\n"
-        "⚠️ <b>دقیقاً همین مبلغ رو واریز کن، نه کمتر و نه بیشتر.</b> "
-        "با مبلغ متفاوت، تایید دیرتر انجام می‌شه.\n"
+        "💳 <b>پرداخت کارت‌به‌کارت</b>\n\n"
+        f"💰 مبلغ دقیق واریز:\n<code>{t['unique_amount']}</code> تومان ({fmt(t['unique_amount'])})\n\n"
+        f"🏦 شماره کارت:\n{card_html}\n"
+        f"{note}\n"
+        "⚠️ <b>دقیقاً همین مبلغ رو واریز کن</b>، نه کمتر و نه بیشتر. با مبلغ متفاوت، تایید دیرتر انجام می‌شه.\n"
         f"⏳ مهلت پرداخت: {left} دقیقه\n\n"
-        "بعد از واریز دکمه‌ی «پرداخت کردم» رو بزن."
+        "بعد از واریز، دکمه‌ی «✅ پرداخت کردم» رو بزن."
     )
 
 
@@ -351,34 +427,77 @@ async def make_unique_amount(base):
     return None
 
 
+async def get_open_topup(uid):
+    return await one("SELECT * FROM topups WHERE user_id=? AND (status='claimed' OR (status='pending' AND expires>?))",
+                     (uid, int(time.time())))
+
+
+async def show_open_topup(msg: Message, t):
+    if t["status"] == "claimed":
+        return await msg.answer("⏳ رسید قبلی‌ت در انتظار تاییده. بعد از تایید می‌تونی دوباره شارژ کنی.")
+    return await msg.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
+
+
+async def start_charge(msg: Message, state: FSMContext, uid: int):
+    await state.clear()
+    t = await get_open_topup(uid)
+    if t:
+        return await show_open_topup(msg, t)
+    await state.set_state(Charge.amount)
+    pres = [p for p in PRESETS if p >= MIN_TOPUP]
+    rows = [[InlineKeyboardButton(text=f"{fmt(p)} تومان", callback_data=f"amt:{p}") for p in pres[i:i + 2]]
+            for i in range(0, len(pres), 2)]
+    rows.append(cancel_row())
+    await msg.answer("💰 <b>شارژ کیف پول</b>\n\n"
+                     "یکی از مبلغ‌ها رو انتخاب کن، یا مبلغ دلخواهت رو (به تومان) تایپ کن و بفرست.\n"
+                     f"📌 حداقل شارژ: <b>{fmt(MIN_TOPUP)}</b> تومان",
+                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def create_topup(msg: Message, state: FSMContext, uid: int, base: int):
+    t = await get_open_topup(uid)
+    if t:
+        await state.clear()
+        return await show_open_topup(msg, t)
+    unique = await make_unique_amount(base)
+    if unique is None:
+        return await msg.answer("الان ظرفیت پر شده، چند دقیقه دیگه دوباره امتحان کن 🙏")
+    now = int(time.time())
+    tid = await db.insert(
+        "INSERT INTO topups(user_id,base,unique_amount,status,created,expires) VALUES (?,?,?,?,?,?)",
+        (uid, base, unique, "pending", now, now + TOPUP_TTL))
+    await state.clear()
+    t = await one("SELECT * FROM topups WHERE id=?", (tid,))
+    await msg.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
+
+
 @router.message(F.text == BTN_CHARGE)
 async def charge(m: Message, state: FSMContext):
-    await state.clear()
-    t = await one("SELECT * FROM topups WHERE user_id=? AND (status='claimed' OR (status='pending' AND expires>?))",
-                  (m.from_user.id, int(time.time())))
-    if t:
-        if t["status"] == "claimed":
-            return await m.answer("⏳ رسید قبلی‌ت در انتظار تاییده. بعد از تایید می‌تونی دوباره شارژ کنی.")
-        return await m.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
-    await state.set_state(Charge.amount)
-    await m.answer(f"مبلغ شارژ رو به تومان بفرست (حداقل {MIN_TOPUP:,}):")
+    await start_charge(m, state, m.from_user.id)
+
+
+@router.callback_query(F.data == "go_charge")
+async def go_charge(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await start_charge(c.message, state, c.from_user.id)
+
+
+@router.callback_query(F.data.startswith("amt:"))
+async def charge_preset(c: CallbackQuery, state: FSMContext):
+    base = int(c.data.split(":")[1])
+    await c.answer()
+    if base < MIN_TOPUP:
+        return
+    await create_topup(c.message, state, c.from_user.id, base)
 
 
 @router.message(Charge.amount, F.text)
 async def charge_amount(m: Message, state: FSMContext):
     base = to_int(m.text)
     if base is None or base < MIN_TOPUP:
-        return await m.answer(f"مبلغ معتبر نیست. یه عدد حداقل {MIN_TOPUP:,} بفرست.")
-    unique = await make_unique_amount(base)
-    if unique is None:
-        return await m.answer("الان ظرفیت پر شده، چند دقیقه دیگه امتحان کن.")
-    now = int(time.time())
-    tid = await db.insert(
-        "INSERT INTO topups(user_id,base,unique_amount,status,created,expires) VALUES (?,?,?,?,?,?)",
-        (m.from_user.id, base, unique, "pending", now, now + TOPUP_TTL))
-    await state.clear()
-    t = await one("SELECT * FROM topups WHERE id=?", (tid,))
-    await m.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
+        return await m.answer(f"مبلغ معتبر نیست 🤔\nیه عدد (به تومان) و حداقل <b>{fmt(MIN_TOPUP)}</b> بفرست:",
+                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    await create_topup(m, state, m.from_user.id, base)
 
 
 @router.callback_query(F.data.startswith("cancel:"))
@@ -387,7 +506,8 @@ async def topup_cancel(c: CallbackQuery):
     cur = await db.execute("UPDATE topups SET status='canceled' WHERE id=? AND user_id=? AND status='pending'",
                            (tid, c.from_user.id))
     await db.commit()
-    await c.message.edit_text("درخواست شارژ لغو شد." if cur.rowcount else "این درخواست قابل لغو نیست.")
+    await c.message.edit_text("درخواست شارژ لغو شد.\nهر وقت خواستی دوباره از «💰 شارژ کیف پول» شروع کن."
+                              if cur.rowcount else "این درخواست دیگه قابل لغو نیست.")
     await c.answer()
 
 
@@ -415,7 +535,7 @@ async def topup_paid(c: CallbackQuery, bot: Bot):
     if cur.rowcount != 1:
         return await c.answer("این درخواست دیگه فعال نیست.", show_alert=True)
     t = await one("SELECT * FROM topups WHERE id=?", (tid,))
-    await c.message.edit_text("✅ ثبت شد. بعد از تایید ادمین، کیف پولت شارژ می‌شه و بهت خبر می‌دم.")
+    await c.message.edit_text("✅ <b>ثبت شد!</b>\n\nبعد از تایید ادمین (معمولاً چند دقیقه) کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم 🙏")
     for a in ADMIN_IDS:
         with suppress(Exception):
             await bot.send_message(a, admin_topup_text(t, c.from_user.username), reply_markup=admin_topup_kb(tid))
@@ -443,7 +563,7 @@ async def tc_ok(c: CallbackQuery, bot: Bot):
     t, credit = r
     await c.message.edit_text(c.message.html_text + f"\n\n✅ تایید شد ({credit:,})")
     with suppress(Exception):
-        await bot.send_message(t["user_id"], f"✅ پرداختت تایید شد و <b>{credit:,}</b> تومان به کیف پولت اضافه شد.")
+        await bot.send_message(t["user_id"], f"✅ <b>پرداختت تایید شد!</b>\n💰 {credit:,} تومان به کیف پولت اضافه شد.\nحالا می‌تونی سفارش بدی 🛒")
     await c.answer()
 
 
@@ -457,7 +577,7 @@ async def tc_no(c: CallbackQuery, bot: Bot):
     t = await one("SELECT * FROM topups WHERE id=?", (tid,))
     await c.message.edit_text(c.message.html_text + "\n\n❌ رد شد")
     with suppress(Exception):
-        await bot.send_message(t["user_id"], "❌ پرداختت تایید نشد. اگه واریز کردی با پشتیبانی تماس بگیر.")
+        await bot.send_message(t["user_id"], "❌ متأسفانه پرداختت تایید نشد.\nاگه واریز کردی، رسید رو برای پشتیبانی بفرست تا بررسی کنیم.")
     await c.answer()
 
 
@@ -481,7 +601,7 @@ async def tc_edit_amount(m: Message, state: FSMContext, bot: Bot):
         return await m.answer("این رسید قبلاً بررسی شده.")
     await m.answer(f"✅ {amount:,} تومان شارژ شد.")
     with suppress(Exception):
-        await bot.send_message(r[0]["user_id"], f"✅ پرداختت تایید شد و <b>{amount:,}</b> تومان به کیف پولت اضافه شد.")
+        await bot.send_message(r[0]["user_id"], f"✅ <b>پرداختت تایید شد!</b>\n💰 {amount:,} تومان به کیف پولت اضافه شد.\nحالا می‌تونی سفارش بدی 🛒")
 
 
 # ───────────────────────── ثبت سفارش ─────────────────────────
@@ -490,55 +610,87 @@ class Order(StatesGroup):
     qty = State()
 
 
+QTY_PRESETS = [1000, 5000, 10000, 20000]
+
+
 @router.message(F.text == BTN_ORDER)
 async def order_start(m: Message, state: FSMContext):
     await state.clear()
     price = int(await get_setting("price_per_1000"))
     await state.set_state(Order.links)
-    await m.answer(f"💵 قیمت هر ۱۰۰۰ سین: <b>{price:,}</b> تومان\n\n"
-                   f"لینک پست‌ها رو بفرست (هر لینک توی یه خط، حداکثر {MAX_LINKS} تا).\n"
-                   "مثال: <code>https://t.me/channel/123</code>")
+    await m.answer("🛒 <b>ثبت سفارش سین</b>\n\n"
+                   f"💵 قیمت هر ۱۰۰۰ سین: <b>{fmt(price)}</b> تومان\n\n"
+                   f"🔗 لینک پست(ها) رو بفرست؛ هر لینک توی یه خط (حداکثر {MAX_LINKS} تا).\n"
+                   "مثال:\n<code>https://t.me/channel/123</code>\n\n"
+                   "⚠️ کانال باید <b>عمومی (Public)</b> باشه.",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
 @router.message(Order.links, F.text)
 async def order_links(m: Message, state: FSMContext):
     links = list(dict.fromkeys(LINK_RE.findall(m.text)))[:MAX_LINKS]
     if not links:
-        return await m.answer("لینک معتبر پیدا نشد. لینک پست کانال رو بفرست (مثل https://t.me/channel/123).")
+        return await m.answer("لینکی پیدا نکردم 🤔\nلینک باید شبیه این باشه:\n<code>https://t.me/channel/123</code>",
+                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     await state.update_data(links=links)
     await state.set_state(Order.qty)
-    lo, hi = await get_setting("min_qty"), await get_setting("max_qty")
-    await m.answer(f"✅ {len(links)} پست دریافت شد.\nتعداد سین برای <b>هر پست</b> رو بفرست ({int(lo):,} تا {int(hi):,}):")
+    lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
+    pres = [q for q in QTY_PRESETS if lo <= q <= hi]
+    rows = [[InlineKeyboardButton(text=fmt(q), callback_data=f"qty:{q}") for q in pres[i:i + 2]]
+            for i in range(0, len(pres), 2)]
+    rows.append(cancel_row())
+    await m.answer(f"✅ {len(links)} پست دریافت شد.\n\n"
+                   f"👁 تعداد سین <b>هر پست</b> رو انتخاب کن یا تایپ کن ({fmt(lo)} تا {fmt(hi)}):",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def process_qty(msg: Message, state: FSMContext, uid: int, qty):
+    lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
+    if qty is None or not lo <= qty <= hi:
+        return await msg.answer(f"تعداد باید بین <b>{fmt(lo)}</b> و <b>{fmt(hi)}</b> باشه 🙏\nدوباره بفرست:",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    links = (await state.get_data()).get("links")
+    if not links:
+        await state.clear()
+        return await msg.answer("این سفارش منقضی شده؛ دوباره از «🛒 ثبت سفارش سین» شروع کن.")
+    price = int(await get_setting("price_per_1000"))
+    link_cost = math.ceil(qty * price / 1000)
+    total = link_cost * len(links)
+    bal = (await one("SELECT balance FROM users WHERE id=?", (uid,)))["balance"]
+    await state.update_data(qty=qty, link_cost=link_cost, total=total)
+    text = ("🧾 <b>خلاصه‌ی سفارش</b>\n\n"
+            f"📌 تعداد پست: {len(links)}\n"
+            f"👁 سین هر پست: {fmt(qty)}\n"
+            f"💵 هزینه‌ی هر پست: {fmt(link_cost)} تومان\n"
+            "━━━━━━━━━━\n"
+            f"💰 <b>جمع کل: {fmt(total)} تومان</b>\n"
+            f"👛 موجودی تو: {fmt(bal)} تومان")
+    if bal < total:
+        await state.clear()
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 شارژ کیف پول", callback_data="go_charge")]])
+        return await msg.answer(text + f"\n\n❌ موجودی کافی نیست. برای این سفارش <b>{fmt(total - bal)}</b> تومان دیگه لازمه.",
+                                reply_markup=kb)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ تایید و ثبت سفارش", callback_data="ord_ok"),
+        InlineKeyboardButton(text="❌ انصراف", callback_data="ord_no")]])
+    await msg.answer(text + "\n\nاگه همه‌چی درسته، تایید رو بزن 👇", reply_markup=kb)
 
 
 @router.message(Order.qty, F.text)
 async def order_qty(m: Message, state: FSMContext):
-    qty = to_int(m.text)
-    lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
-    if qty is None or not lo <= qty <= hi:
-        return await m.answer(f"تعداد باید بین {lo:,} و {hi:,} باشه.")
-    price = int(await get_setting("price_per_1000"))
-    links = (await state.get_data())["links"]
-    link_cost = math.ceil(qty * price / 1000)
-    total = link_cost * len(links)
-    bal = (await one("SELECT balance FROM users WHERE id=?", (m.from_user.id,)))["balance"]
-    await state.update_data(qty=qty, link_cost=link_cost, total=total)
-    text = (f"🧾 <b>خلاصه سفارش</b>\n\n📌 تعداد پست: {len(links)}\n👁 سین هر پست: {qty:,}\n"
-            f"💵 هزینه هر پست: {link_cost:,}\n💰 <b>جمع کل: {total:,} تومان</b>\n"
-            f"👛 موجودی تو: {bal:,} تومان")
-    if bal < total:
-        await state.clear()
-        return await m.answer(text + f"\n\n❌ موجودی کافی نیست. {total - bal:,} تومان دیگه لازمه، از «{BTN_CHARGE}» شارژ کن.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ تایید و ثبت", callback_data="ord_ok"),
-        InlineKeyboardButton(text="❌ لغو", callback_data="ord_no")]])
-    await m.answer(text, reply_markup=kb)
+    await process_qty(m, state, m.from_user.id, to_int(m.text))
+
+
+@router.callback_query(F.data.startswith("qty:"), Order.qty)
+async def order_qty_preset(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await process_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
 
 
 @router.callback_query(F.data == "ord_no")
 async def order_cancel(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await c.message.edit_text("سفارش لغو شد.")
+    await c.message.edit_text("سفارش لغو شد. پولی از حسابت کم نشد ✅")
     await c.answer()
 
 
@@ -561,24 +713,53 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
         else:
             errors.append(info)
             await balance_change(uid, d["link_cost"], "refund-failed-order")
-    text = f"✅ {done} سفارش ثبت شد."
+    if done:
+        text = (f"✅ <b>{done} سفارش با موفقیت ثبت شد!</b>\n\n"
+                "🚀 سین‌ها به‌تدریج ارسال می‌شن. پیشرفت رو از «📦 سفارش‌های من» ببین.")
+    else:
+        text = "❌ <b>متأسفانه سفارش ثبت نشد.</b>"
     if errors:
-        text += f"\n❌ {len(errors)} سفارش ثبت نشد و {len(errors) * d['link_cost']:,} تومان به کیف پولت برگشت."
+        text += (f"\n\n⚠️ {len(errors)} سفارش ثبت نشد و {fmt(len(errors) * d['link_cost'])} تومان به کیف پولت برگشت. "
+                 "لطفاً کمی بعد دوباره تلاش کن یا به پشتیبانی پیام بده.")
         await notify_admins(bot, f"⚠️ خطا در ثبت سفارش (کاربر {uid}):\n{html.escape(errors[0][:300])}")
-    await c.message.edit_text(text + "\nوضعیت رو از «📦 سفارش‌های من» ببین.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 سفارش‌های من", callback_data="my_orders")]])
+    await c.message.edit_text(text, reply_markup=kb)
     await c.answer()
+
+
+async def show_orders(msg: Message, uid: int, edit=False):
+    for o in await many("SELECT * FROM orders WHERE user_id=? AND settled=0 ORDER BY id DESC LIMIT 10", (uid,)):
+        await sync_order(o)
+    rows = await many("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
+    if not rows:
+        return await msg.answer("هنوز سفارشی ثبت نکردی 🙂\nاز «🛒 ثبت سفارش سین» شروع کن 🚀")
+    lines = [f"<b>#{o['id']}</b> • {fmt(o['quantity'])} سین • {STATUS_FA.get(o['status'], o['status'])}\n🔗 {o['link']}"
+             for o in rows]
+    text = "📦 <b>سفارش‌های اخیر</b>\n\n" + "\n\n".join(lines)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="orders_refresh")]])
+    if edit:
+        with suppress(Exception):
+            return await msg.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        return
+    await msg.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
 
 @router.message(F.text == BTN_ORDERS)
 async def my_orders(m: Message, state: FSMContext):
     await state.clear()
-    for o in await many("SELECT * FROM orders WHERE user_id=? AND settled=0 ORDER BY id DESC LIMIT 10", (m.from_user.id,)):
-        await sync_order(o)
-    rows = await many("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (m.from_user.id,))
-    if not rows:
-        return await m.answer("هنوز سفارشی نداری.")
-    lines = [f"#{o['id']} | {o['quantity']:,} سین | {STATUS_FA.get(o['status'], o['status'])}\n{o['link']}" for o in rows]
-    await m.answer("📦 <b>۱۰ سفارش آخر:</b>\n\n" + "\n\n".join(lines), disable_web_page_preview=True)
+    await show_orders(m, m.from_user.id)
+
+
+@router.callback_query(F.data == "my_orders")
+async def my_orders_cb(c: CallbackQuery):
+    await c.answer()
+    await show_orders(c.message, c.from_user.id)
+
+
+@router.callback_query(F.data == "orders_refresh")
+async def orders_refresh(c: CallbackQuery):
+    await c.answer("بروز شد ✅")
+    await show_orders(c.message, c.from_user.id, edit=True)
 
 
 # ───────────────────────── پنل ادمین ─────────────────────────
@@ -593,7 +774,8 @@ async def admin_panel(m: Message):
         f"🛒 سفارش‌ها: {o['n']} | فروش: {o['s']:,}\n"
         f"🕓 رسید در انتظار: {p['n']}\n💵 قیمت هر ۱۰۰۰: {int(price):,}\n\n"
         "<b>دستورات:</b>\n/pending رسیدهای در انتظار\n/add id مبلغ\n/sub id مبلغ\n/ban id\n/unban id\n"
-        "/price مبلغ\n/card متن کارت\n/limits حداقل حداکثر\n/provider موجودی provider\n/broadcast متن")
+        "/price مبلغ\n/card متن کارت\n/limits حداقل حداکثر\n/support @آیدی\n/brand نام ربات\n"
+        "/provider موجودی provider\n/broadcast متن")
 
 
 @router.message(Command("pending"), IS_ADMIN)
@@ -655,6 +837,22 @@ async def cmd_card(m: Message, command: CommandObject):
         return await m.answer("فرمت: /card 6037... به نام ...")
     await set_setting("card", command.args)
     await m.answer("✅ اطلاعات کارت عوض شد.")
+
+
+@router.message(Command("support"), IS_ADMIN)
+async def cmd_support(m: Message, command: CommandObject):
+    if not command.args:
+        return await m.answer("فرمت: /support @username")
+    await set_setting("support", command.args.strip())
+    await m.answer("✅ آیدی پشتیبانی عوض شد.")
+
+
+@router.message(Command("brand"), IS_ADMIN)
+async def cmd_brand(m: Message, command: CommandObject):
+    if not command.args:
+        return await m.answer("فرمت: /brand نام ربات")
+    await set_setting("brand", command.args.strip())
+    await m.answer("✅ نام ربات عوض شد.")
 
 
 @router.message(Command("limits"), IS_ADMIN)
