@@ -576,13 +576,17 @@ async def welcome_text(user):
     brand = html.escape(await get_setting("brand"))
     price = int(await get_setting("price_per_1000"))
     bal = (await one("SELECT balance FROM users WHERE id=?", (user.id,)))["balance"]
+    what = "<b>سین (بازدید)</b>، <b>ریکشن</b> و <b>رأی نظرسنجی</b>" if EXTRAS else "<b>سین (بازدید)</b>"
     return (f"سلام {html.escape(user.first_name or 'دوست عزیز')} 👋\n"
             f"به <b>{brand}</b> خوش اومدی!\n\n"
-            "اینجا می‌تونی خیلی سریع و خودکار برای پست‌های کانالت <b>سین (بازدید)</b> سفارش بدی؛ "
-            "بدون معطلی و بدون پیام دادن به پشتیبان.\n\n"
+            f"اینجا می‌تونی برای پست‌های کانال تلگرامت {what} سفارش بدی؛ خودکار و بدون منتظر موندن برای پشتیبان.\n\n"
+            "🚀 <b>شروع سریع:</b>\n"
+            "۱) از «💰 شارژ کیف پول» حسابت رو شارژ کن\n"
+            "۲) «🛒 ثبت سفارش سین» رو بزن و لینک پست + تعداد رو بفرست\n"
+            "۳) سفارش رو تایید کن؛ تمام!\n\n"
             f"💵 قیمت هر ۱۰۰۰ سین: <b>{fmt(price)}</b> تومان\n"
             f"👛 موجودی تو: <b>{fmt(bal)}</b> تومان\n\n"
-            "از منوی پایین شروع کن 👇")
+            "سوالی داشتی؟ «📖 راهنما و قوانین» رو بزن.")
 
 
 @router.message(CommandStart())
@@ -630,18 +634,22 @@ async def history(c: CallbackQuery):
 
 
 HELP_TEXT = (
-    "📖 <b>راهنمای استفاده</b>\n\n"
-    "1️⃣ از «💰 شارژ کیف پول» حسابت رو شارژ کن.\n"
-    "2️⃣ «🛒 ثبت سفارش سین» رو بزن و لینک پست‌ها رو بفرست.\n"
-    "3️⃣ تعداد سین هر پست رو انتخاب کن و سفارش رو تایید کن.\n"
-    "4️⃣ پیشرفت کار رو از «📦 سفارش‌های من» ببین.\n\n"
+    "📖 <b>راهنمای کامل</b>\n\n"
+    "<b>سین</b> یعنی بازدید زیر پست کانال."
+    + (" <b>ریکشن</b> ایموجی‌ایه که زیر پست می‌خوره (مثل 👍 ❤️ 🔥) و <b>رأی</b> یعنی انتخاب یه گزینه‌ی نظرسنجی." if EXTRAS else "")
+    + "\n\n🚀 <b>چطور سفارش بدم؟</b>\n"
+    "1️⃣ «💰 شارژ کیف پول» رو بزن، مبلغ رو انتخاب کن و کارت‌به‌کارت کن. بعدش «پرداخت کردم» رو بزن و عکس رسید رو بفرست. بعد از تایید ادمین، کیف پولت شارژ می‌شه.\n"
+    "2️⃣ «🛒 ثبت سفارش سین» رو بزن، لینک پست و بعد تعداد رو بفرست.\n"
+    "3️⃣ خلاصه‌ی سفارش رو ببین و «تایید» رو بزن.\n"
+    "4️⃣ پیشرفت کار رو از «📦 سفارش‌های من» ببین؛ بعد از کامل شدن هم بهت پیام می‌دم.\n\n"
     "📜 <b>قوانین مهم</b>\n"
-    "• کانال باید <b>عمومی (Public)</b> باشه و تا پایان سفارش خصوصی نشه.\n"
+    "• کانال باید <b>عمومی</b> باشه (آیدی @ داشته باشه) و تا پایان سفارش خصوصی نشه.\n"
     "• تا کامل شدن سفارش، برای همون پست سفارش دوم ثبت نکن.\n"
     "• لینک رو دقیق بفرست؛ لینک اشتباه ممکنه باعث انجام نشدن سفارش بشه.\n"
     "• اگه سفارشی لغو بشه یا ناقص بمونه، هزینه‌ی بخش انجام‌نشده خودکار به کیف پولت برمی‌گرده.\n"
-    "• برای تایید سریع‌تر شارژ، دقیقاً همون مبلغی که ربات نشون می‌ده رو واریز کن.\n"
-    "• زمان رسیدن سین‌ها بسته به سرویس و شرایط تلگرام ممکنه کمی متفاوت باشه."
+    "• برای شارژ، دقیقاً همون مبلغی که ربات نشون می‌ده رو واریز کن تا سریع‌تر تایید بشه.\n"
+    "• زمان رسیدن سفارش بسته به شرایط تلگرام ممکنه کمی متفاوت باشه.\n\n"
+    "💬 هر سوال دیگه‌ای داشتی، «💬 پشتیبانی» رو بزن."
 )
 
 
@@ -677,7 +685,7 @@ class AdminUser(StatesGroup):
     amount = State()
 
 
-PRESETS = [50000, 100000, 200000, 500000]
+PRESETS = [10000, 20000, 50000, 100000]
 
 
 async def topup_text(t):
@@ -685,15 +693,16 @@ async def topup_text(t):
     card_html = f"<code>{html.escape(card[0])}</code>" + (f"\n{html.escape(card[1])}" if len(card) > 1 else "")
     left = max(0, (t["expires"] - int(time.time())) // 60)
     note = "" if CREDIT_FULL else (
-        f"\n📌 مبلغ <b>{fmt(t['base'])}</b> تومان به کیف پولت اضافه می‌شه؛ عدد اضافه‌ی آخر فقط برای شناسایی پرداخته.\n")
+        f"\n📌 رقم‌های آخرِ مبلغ فقط برای شناسایی پرداخته؛ <b>{fmt(t['base'])} تومان</b> به کیف پولت اضافه می‌شه.\n")
     return (
         "💳 <b>پرداخت کارت‌به‌کارت</b>\n\n"
-        f"💰 مبلغ دقیق واریز:\n<code>{t['unique_amount']}</code> تومان ({fmt(t['unique_amount'])})\n\n"
-        f"🏦 شماره کارت:\n{card_html}\n"
+        f"1️⃣ دقیقاً این مبلغ رو به کارت زیر واریز کن:\n💰 <code>{t['unique_amount']}</code> تومان\n\n"
+        f"🏦 شماره کارت:\n{card_html}\n\n"
+        "⚠️ مبلغ باید <b>دقیقاً همین عدد</b> باشه (حتی رقم‌های آخرش)؛ نه کمتر و نه بیشتر. "
+        "این‌جوری پرداختت سریع‌تر شناسایی و تایید می‌شه.\n"
         f"{note}\n"
-        "⚠️ <b>دقیقاً همین مبلغ رو واریز کن</b>، نه کمتر و نه بیشتر. با مبلغ متفاوت، تایید دیرتر انجام می‌شه.\n"
-        f"⏳ مهلت پرداخت: {left} دقیقه\n\n"
-        "بعد از واریز، دکمه‌ی «✅ پرداخت کردم» رو بزن."
+        "2️⃣ بعد از واریز، دکمه‌ی «✅ پرداخت کردم» رو بزن و عکس رسید رو بفرست.\n"
+        f"⏳ مهلت پرداخت: {left} دقیقه"
     )
 
 
@@ -722,9 +731,9 @@ async def get_open_topup(uid):
 
 async def show_open_topup(msg: Message, t):
     if t["status"] == "claimed":
-        return await msg.answer("⏳ رسید قبلی‌ت در انتظار تاییده. بعد از تایید می‌تونی دوباره شارژ کنی.")
+        return await msg.answer("⏳ رسید قبلی‌ت در انتظار تایید ادمینه.\nبعد از تایید می‌تونی دوباره شارژ کنی.")
     if t["status"] == "awaiting":
-        return await msg.answer("🧾 منتظر رسید پرداختت هستم!\nعکس رسید یا شماره پیگیری رو همین‌جا بفرست.")
+        return await msg.answer("🧾 منتظر رسید پرداختت هستم.\nعکس رسید (یا شماره‌ی پیگیری) رو همین‌جا بفرست.")
     return await msg.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
 
 
@@ -739,7 +748,8 @@ async def start_charge(msg: Message, state: FSMContext, uid: int):
             for i in range(0, len(pres), 2)]
     rows.append(cancel_row())
     await msg.answer("💰 <b>شارژ کیف پول</b>\n\n"
-                     "یکی از مبلغ‌ها رو انتخاب کن، یا مبلغ دلخواهت رو (به تومان) تایپ کن و بفرست.\n"
+                     "برای سفارش دادن، اول باید کیف پولت پول داشته باشه.\n\n"
+                     "👇 یکی از مبلغ‌ها رو بزن، یا مبلغ دلخواهت رو (به تومان، فقط عدد) تایپ کن و بفرست.\n"
                      f"📌 حداقل شارژ: <b>{fmt(MIN_TOPUP)}</b> تومان",
                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -785,7 +795,9 @@ async def charge_preset(c: CallbackQuery, state: FSMContext):
 async def charge_amount(m: Message, state: FSMContext):
     base = to_int(m.text)
     if base is None or base < MIN_TOPUP:
-        return await m.answer(f"مبلغ معتبر نیست 🤔\nیه عدد (به تومان) و حداقل <b>{fmt(MIN_TOPUP)}</b> بفرست:",
+        return await m.answer("مبلغ معتبر نیست 🤔\n"
+                              "فقط عدد (به تومان) بفرست؛ مثلاً: <code>50000</code>\n"
+                              f"📌 حداقل شارژ: <b>{fmt(MIN_TOPUP)}</b> تومان",
                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     await create_topup(m, state, m.from_user.id, base)
 
@@ -825,11 +837,12 @@ async def topup_paid(c: CallbackQuery):
     if cur.rowcount != 1:
         return await c.answer("این درخواست دیگه فعال نیست.", show_alert=True)
     t = await one("SELECT * FROM topups WHERE id=?", (tid,))
+    credit = t["unique_amount"] if CREDIT_FULL else t["base"]
     await c.message.edit_text(
-        "🧾 <b>حالا رسید پرداخت رو بفرست</b>\n\n"
-        "عکس رسید (یا شماره پیگیری) رو همین‌جا بفرست تا برای ادمین ارسال بشه. "
-        "بعد از تایید، کیف پولت شارژ می‌شه و بهت خبر می‌دم.\n\n"
-        f"💰 مبلغ واریزی: <code>{t['unique_amount']}</code> تومان")
+        "🧾 <b>مرحله‌ی آخر: رسید رو بفرست</b>\n\n"
+        "عکس رسید (یا شماره‌ی پیگیری) رو همین‌جا بفرست تا برای تایید به ادمین برسه.\n\n"
+        f"✅ بعد از تایید، <b>{fmt(credit)} تومان</b> به کیف پولت اضافه می‌شه و بهت پیام می‌دم.\n"
+        f"💰 مبلغ واریزی تو: <code>{t['unique_amount']}</code> تومان")
     await c.answer()
 
 
@@ -911,11 +924,12 @@ async def order_start(m: Message, state: FSMContext):
         return await m.answer(MAINT_TEXT)
     price = int(await get_setting("price_per_1000"))
     await state.set_state(Order.links)
-    await m.answer("🛒 <b>ثبت سفارش سین</b>\n\n"
-                   f"💵 قیمت هر ۱۰۰۰ سین: <b>{fmt(price)}</b> تومان\n\n"
-                   f"🔗 لینک پست(ها) رو بفرست؛ هر لینک توی یه خط (حداکثر {MAX_LINKS} تا).\n"
-                   "مثال:\n<code>https://t.me/channel/123</code>\n\n"
-                   "⚠️ کانال باید <b>عمومی (Public)</b> باشه.",
+    await m.answer("🛒 <b>ثبت سفارش سین (بازدید)</b>\n\n"
+                   f"💵 قیمت: هر ۱۰۰۰ سین = <b>{fmt(price)}</b> تومان\n\n"
+                   "🔗 <b>مرحله ۱ از ۲:</b> لینک پستی که می‌خوای سین بخوره رو بفرست.\n"
+                   f"• اگه چند پست داری، هر لینک رو توی یه خط بنویس (حداکثر {MAX_LINKS} تا).\n"
+                   "• مثال: <code>https://t.me/channel/123</code>\n\n"
+                   "⚠️ کانال باید <b>عمومی</b> باشه (آیدی @ داشته باشه).",
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
@@ -981,18 +995,20 @@ async def order_links(m: Message, state: FSMContext, bot: Bot):
     await state.update_data(links=links)
     await state.set_state(Order.qty)
     lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
-    pres = [q for q in QTY_PRESETS if lo <= q <= hi]
-    rows = [[InlineKeyboardButton(text=fmt(q), callback_data=f"qty:{q}") for q in pres[i:i + 2]]
-            for i in range(0, len(pres), 2)]
-    rows.append(cancel_row())
+    price = int(await get_setting("price_per_1000"))
     await m.answer(note + f"✅ {len(links)} پست دریافت شد.\n\n"
-                   f"👁 تعداد سین <b>هر پست</b> رو انتخاب کن یا تایپ کن ({fmt(lo)} تا {fmt(hi)}):",
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+                   "👁 <b>مرحله ۲ از ۲:</b> تعداد سین (بازدید) برای <b>هر پست</b> رو به‌صورت عدد بنویس و بفرست.\n"
+                   "مثال: <code>1000</code>\n\n"
+                   f"📌 حداقل {fmt(lo)} و حداکثر {fmt(hi)}\n"
+                   f"💡 هر ۱۰۰۰ سین = {fmt(price)} تومان",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]), disable_web_page_preview=True)
 
 
 # ───────────────────────── خلاصه‌ی سفارش، سرعت و ارسال تدریجی ─────────────────────────
-DRIP_CHOICES = [(0, "⚡ سریع"), (180, "🐢 ۳ ساعته"), (360, "🐢 ۶ ساعته"), (720, "🐢 ۱۲ ساعته"), (1440, "🐢 ۲۴ ساعته")]
-SPEED_CHOICES = [(1, "⚡ سریع"), (5, "🐢 هر ۵ دقیقه"), (15, "🐢 هر ۱۵ دقیقه"), (30, "🐢 هر ۳۰ دقیقه")]
+DRIP_CHOICES = [(0, "⚡ سریع (پیش‌فرض)"), (180, "🐢 تدریجی: طی حدود ۳ ساعت"), (360, "🐢 تدریجی: طی حدود ۶ ساعت"),
+                (720, "🐢 تدریجی: طی حدود ۱۲ ساعت"), (1440, "🐢 تدریجی: طی حدود ۲۴ ساعت")]
+SPEED_CHOICES = [(1, "⚡ سریع (پیش‌فرض)"), (5, "🐢 آرام: هر ۵ دقیقه یک بخش"), (15, "🐢 آرام: هر ۱۵ دقیقه یک بخش"),
+                 (30, "🐢 آرام: هر ۳۰ دقیقه یک بخش")]
 
 
 def drip_params(qty, minutes):
@@ -1029,17 +1045,6 @@ def build_opts(d, kind):
     return o
 
 
-def speed_rows(kind, d):
-    if not EXTRAS:
-        return []
-    if kind == "view":
-        cur, items = d.get("drip", 0), [(f"drip:{m}", t, m) for m, t in DRIP_CHOICES]
-    else:
-        cur, items = d.get("speed", 1), [(f"spd:{n}", t, n) for n, t in SPEED_CHOICES]
-    btns = [InlineKeyboardButton(text=("✅ " if v == cur else "") + t, callback_data=cb) for cb, t, v in items]
-    return [btns[i:i + 2] for i in range(0, len(btns), 2)]
-
-
 async def show_summary(msg: Message, state: FSMContext, uid: int, edit=False):
     d = await state.get_data()
     kind, links, posts = d.get("kind", "view"), d.get("links") or [], d.get("posts", 1)
@@ -1047,33 +1052,39 @@ async def show_summary(msg: Message, state: FSMContext, uid: int, edit=False):
     bal = (await one("SELECT balance FROM users WHERE id=?", (uid,)))["balance"]
     if kind == "reaction":
         head = "🧾 <b>خلاصه‌ی سفارش ریکشن</b>\n\n"
-        lines = [f"📌 تعداد پست: {len(links)}", f"{d['emoji']} ریکشن هر پست: {fmt(qty)}"]
+        lines = [f"📌 تعداد پست: {len(links)}", f"{d['emoji']} تعداد ریکشن هر پست: {fmt(qty)}"]
     elif kind == "like":
         head = "🧾 <b>خلاصه‌ی سفارش رأی</b>\n\n"
-        lines = [f"📌 پست: {links[0]}", f"🗳 گزینه: سطر {d['row']}، ستون {d['col']}", f"👍 تعداد رأی: {fmt(qty)}"]
+        lines = [f"📌 پست: {links[0]}", f"🗳 گزینه: ردیف {d['row']}، ستون {d['col']}", f"👍 تعداد رأی: {fmt(qty)}"]
     elif posts > 1:
         head = "🧾 <b>خلاصه‌ی سفارش سین</b>\n\n"
         lines = [f"📚 {posts} پست آخر کانال: {links[0]}", f"👁 سین هر پست: {fmt(qty)}"]
     else:
         head = "🧾 <b>خلاصه‌ی سفارش سین</b>\n\n"
         lines = [f"📌 تعداد پست: {len(links)}", f"👁 سین هر پست: {fmt(qty)}"]
+    lines.append(f"💵 هزینه‌ی هر پست: {fmt(link_cost // posts)} تومان" if kind != "like" else f"💵 هزینه: {fmt(link_cost)} تومان")
     if EXTRAS:
         if kind == "view":
             dm = d.get("drip", 0)
-            lines.append("⚡ سرعت: حداکثر" if not dm else f"🐢 ارسال تدریجی: {fmt_minutes(drip_actual_minutes(qty, dm))}")
+            lines.append("⏱ سرعت ارسال: حداکثر (پیش‌فرض)" if not dm
+                         else f"⏱ سرعت ارسال: تدریجی، {fmt_minutes(drip_actual_minutes(qty, dm))}")
         else:
             sp = d.get("speed", 1)
-            lines.append("⚡ سرعت: حداکثر" if sp == 1 else f"🐢 هر {sp} دقیقه یک بخش")
-    lines.append(f"💵 هزینه‌ی هر پست: {fmt(link_cost // posts)} تومان" if kind != "like" else f"💵 هزینه: {fmt(link_cost)} تومان")
-    text = head + "\n".join(lines) + f"\n━━━━━━━━━━\n💰 <b>جمع کل: {fmt(total)} تومان</b>\n👛 موجودی تو: {fmt(bal)} تومان"
+            lines.append("⏱ سرعت ارسال: حداکثر (پیش‌فرض)" if sp == 1 else f"⏱ سرعت ارسال: آرام، هر {sp} دقیقه یک بخش")
+    text = (head + "\n".join(lines) +
+            f"\n\n💰 <b>مبلغ قابل پرداخت: {fmt(total)} تومان</b>\n👛 موجودی کیف پولت: {fmt(bal)} تومان")
     if bal < total:
         await state.clear()
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 شارژ کیف پول", callback_data="go_charge")]])
-        return await msg.answer(text + f"\n\n❌ موجودی کافی نیست. برای این سفارش <b>{fmt(total - bal)}</b> تومان دیگه لازمه.", reply_markup=kb)
+        return await msg.answer(text + f"\n\n❌ موجودی کافی نیست. برای این سفارش <b>{fmt(total - bal)}</b> تومان دیگه لازمه.",
+                                reply_markup=kb, disable_web_page_preview=True)
+    text += (f"\n👛 موجودی بعد از سفارش: {fmt(bal - total)} تومان\n\n"
+             "با زدن «تایید»، مبلغ از کیف پولت کم می‌شه و سفارش ثبت می‌شه 👇")
     rows = [[InlineKeyboardButton(text="✅ تایید و ثبت سفارش", callback_data="ord_ok"),
-             InlineKeyboardButton(text="❌ انصراف", callback_data="ord_no")]] + speed_rows(kind, d)
+             InlineKeyboardButton(text="❌ انصراف", callback_data="ord_no")]]
+    if EXTRAS:
+        rows.append([InlineKeyboardButton(text="⏱ تغییر سرعت ارسال (اختیاری)", callback_data="spd_menu")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    text += "\n\nاگه همه‌چی درسته، تایید رو بزن 👇"
     if edit:
         with suppress(Exception):
             await msg.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
@@ -1081,12 +1092,44 @@ async def show_summary(msg: Message, state: FSMContext, uid: int, edit=False):
     await msg.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
 
+@router.callback_query(F.data == "spd_menu")
+async def speed_menu(c: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    if "qty" not in d:
+        return await c.answer("این سفارش منقضی شده؛ دوباره ثبت کن.", show_alert=True)
+    if d.get("kind", "view") == "view":
+        body = ("⏱ <b>سرعت ارسال</b>\n\n"
+                "پیش‌فرض، سین‌ها <b>با حداکثر سرعت</b> می‌رسن و معمولاً نیازی به تغییر نیست.\n\n"
+                "اگه می‌خوای طبیعی‌تر دیده بشه، ارسال رو <b>تدریجی</b> کن؛ یعنی سین‌ها طی چند ساعت پخش می‌شن.\n\n"
+                "یکی رو انتخاب کن 👇")
+        cur, items = d.get("drip", 0), [(f"drip:{m}", t, m) for m, t in DRIP_CHOICES]
+    else:
+        body = ("⏱ <b>سرعت ارسال</b>\n\n"
+                "پیش‌فرض، سفارش <b>با حداکثر سرعت</b> ثبت می‌شه و معمولاً نیازی به تغییر نیست.\n\n"
+                "اگه می‌خوای طبیعی‌تر دیده بشه، «آرام» رو انتخاب کن؛ یعنی هر چند دقیقه فقط یه بخش از سفارش ارسال می‌شه.\n\n"
+                "یکی رو انتخاب کن 👇")
+        cur, items = d.get("speed", 1), [(f"spd:{n}", t, n) for n, t in SPEED_CHOICES]
+    rows = [[InlineKeyboardButton(text=("✅ " if v == cur else "") + t, callback_data=cb)] for cb, t, v in items]
+    rows.append([InlineKeyboardButton(text="↩️ بازگشت به سفارش", callback_data="spd_back")])
+    await c.answer()
+    with suppress(Exception):
+        await c.message.edit_text(body, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data == "spd_back")
+async def speed_back(c: CallbackQuery, state: FSMContext):
+    if "qty" not in await state.get_data():
+        return await c.answer("این سفارش منقضی شده؛ دوباره ثبت کن.", show_alert=True)
+    await c.answer()
+    await show_summary(c.message, state, c.from_user.id, edit=True)
+
+
 @router.callback_query(F.data.startswith("drip:"))
 async def set_drip(c: CallbackQuery, state: FSMContext):
     if "qty" not in await state.get_data():
         return await c.answer("این سفارش منقضی شده؛ دوباره ثبت کن.", show_alert=True)
     await state.update_data(drip=int(c.data.split(":")[1]))
-    await c.answer()
+    await c.answer("ثبت شد ✅")
     await show_summary(c.message, state, c.from_user.id, edit=True)
 
 
@@ -1095,14 +1138,14 @@ async def set_speed(c: CallbackQuery, state: FSMContext):
     if "qty" not in await state.get_data():
         return await c.answer("این سفارش منقضی شده؛ دوباره ثبت کن.", show_alert=True)
     await state.update_data(speed=int(c.data.split(":")[1]))
-    await c.answer()
+    await c.answer("ثبت شد ✅")
     await show_summary(c.message, state, c.from_user.id, edit=True)
 
 
 async def process_qty(msg: Message, state: FSMContext, uid: int, qty):
     lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
     if qty is None or not lo <= qty <= hi:
-        return await msg.answer(f"تعداد باید بین <b>{fmt(lo)}</b> و <b>{fmt(hi)}</b> باشه 🙏\nدوباره بفرست:",
+        return await msg.answer(f"تعداد باید یه <b>عدد</b> بین <b>{fmt(lo)}</b> و <b>{fmt(hi)}</b> باشه 🙏\nدوباره بنویس و بفرست:",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     d = await state.get_data()
     links, posts = d.get("links"), d.get("posts", 1)
@@ -1229,10 +1272,12 @@ async def react_start(m: Message, state: FSMContext):
     price = await react_price()
     await state.set_state(React.links)
     await m.answer("👍 <b>ثبت ریکشن</b>\n\n"
-                   f"💵 قیمت هر ۱۰۰ ریکشن: <b>{fmt(price)}</b> تومان\n\n"
-                   f"🔗 لینک پست(ها) رو بفرست؛ هر لینک توی یه خط (حداکثر {MAX_LINKS} تا).\n"
-                   "مثال:\n<code>https://t.me/channel/123</code>\n\n"
-                   "⚠️ کانال باید <b>عمومی (Public)</b> باشه.",
+                   "ریکشن یعنی ایموجی‌ای که زیر پست کانال می‌خوره (مثل 👍 یا ❤️ یا 🔥).\n\n"
+                   f"💵 قیمت: هر ۱۰۰ ریکشن = <b>{fmt(price)}</b> تومان\n\n"
+                   "🔗 <b>مرحله ۱ از ۳:</b> لینک پست(ها) رو بفرست.\n"
+                   f"• اگه چند پست داری، هر لینک رو توی یه خط بنویس (حداکثر {MAX_LINKS} تا).\n"
+                   "• مثال: <code>https://t.me/channel/123</code>\n\n"
+                   "⚠️ کانال باید <b>عمومی</b> باشه (آیدی @ داشته باشه).",
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
@@ -1247,8 +1292,9 @@ async def react_links(m: Message, state: FSMContext, bot: Bot):
     rows = [[InlineKeyboardButton(text=e, callback_data=f"emo:{i}") for i, e in enumerate(EMOJIS) if k <= i < k + 6]
             for k in range(0, len(EMOJIS), 6)]
     rows.append(cancel_row())
-    await m.answer(note + f"✅ {len(links)} پست دریافت شد.\n\nریکشن مورد نظرت رو انتخاب کن (همه‌ی ریکشن‌های تلگرام هست) 👇",
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await m.answer(note + f"✅ {len(links)} پست دریافت شد.\n\n"
+                   "😀 <b>مرحله ۲ از ۳:</b> کدوم ریکشن زده بشه؟ یکی از ایموجی‌ها رو بزن 👇",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), disable_web_page_preview=True)
 
 
 @router.callback_query(F.data.startswith("emo:"), React.emoji)
@@ -1269,17 +1315,18 @@ async def react_emoji(c: CallbackQuery, state: FSMContext):
             return await c.message.answer(note + "یه ریکشن دیگه انتخاب کن یا لینک جدید بفرست.", disable_web_page_preview=True)
     await state.update_data(links=links, emoji=emoji)
     await state.set_state(React.qty)
-    pres = [q for q in REACT_QTY_PRESETS if REACT_MIN <= q <= REACT_MAX]
-    rows = [[InlineKeyboardButton(text=fmt(q), callback_data=f"rqty:{q}") for q in pres[k:k + 2]] for k in range(0, len(pres), 2)]
-    rows.append(cancel_row())
-    await c.message.answer(note + f"{emoji} انتخاب شد.\n\n🔢 تعداد ریکشن <b>برای هر پست</b> رو انتخاب کن یا تایپ کن "
-                           f"({fmt(REACT_MIN)} تا {fmt(REACT_MAX)}):",
-                           reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), disable_web_page_preview=True)
+    price = await react_price()
+    await c.message.answer(note + f"{emoji} انتخاب شد.\n\n"
+                           "🔢 <b>مرحله ۳ از ۳:</b> تعداد ریکشن برای <b>هر پست</b> رو به‌صورت عدد بنویس و بفرست.\n"
+                           "مثال: <code>50</code>\n\n"
+                           f"📌 حداقل {fmt(REACT_MIN)} و حداکثر {fmt(REACT_MAX)}\n"
+                           f"💡 هر ۱۰۰ ریکشن = {fmt(price)} تومان",
+                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]), disable_web_page_preview=True)
 
 
 async def process_react_qty(msg: Message, state: FSMContext, uid: int, qty):
     if qty is None or not REACT_MIN <= qty <= REACT_MAX:
-        return await msg.answer(f"تعداد باید بین <b>{fmt(REACT_MIN)}</b> و <b>{fmt(REACT_MAX)}</b> باشه 🙏\nدوباره بفرست:",
+        return await msg.answer(f"تعداد باید یه <b>عدد</b> بین <b>{fmt(REACT_MIN)}</b> و <b>{fmt(REACT_MAX)}</b> باشه 🙏\nدوباره بنویس و بفرست:",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     d = await state.get_data()
     links, emoji = d.get("links"), d.get("emoji")
@@ -1339,11 +1386,14 @@ async def last_start(m: Message, state: FSMContext):
         return await m.answer(MAINT_TEXT)
     price = int(await get_setting("price_per_1000"))
     await state.set_state(LastX.link)
-    await m.answer("📚 <b>سین چند پست آخر کانال</b>\n\n"
-                   f"💵 قیمت هر ۱۰۰۰ سین: <b>{fmt(price)}</b> تومان\n\n"
-                   "لینک کانال عمومی رو بفرست، مثل:\n<code>https://t.me/channel</code>\n\n"
-                   "ربات خودش آخرین پست‌های کانال رو پیدا می‌کنه و برای همه‌شون سین ثبت می‌کنه.\n"
-                   "💰 هزینه = تعداد پست × سین هر پست",
+    await m.answer("📚 <b>سین برای چند پست آخر کانال</b>\n\n"
+                   "وقتی می‌خوای روی چند تا از آخرین پست‌های کانالت <b>یکجا</b> سین بخوره، از این بخش استفاده کن. "
+                   "لازم نیست لینک تک‌تک پست‌ها رو بفرستی.\n\n"
+                   f"💵 قیمت: هر ۱۰۰۰ سین = <b>{fmt(price)}</b> تومان\n"
+                   "💰 هزینه = تعداد پست × سین هر پست\n\n"
+                   "🔗 <b>مرحله ۱ از ۳:</b> لینک کانالت رو بفرست.\n"
+                   "مثال: <code>https://t.me/channel</code>\n\n"
+                   "⚠️ کانال باید <b>عمومی</b> باشه (آیدی @ داشته باشه).",
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
@@ -1355,10 +1405,12 @@ async def last_link(m: Message, state: FSMContext, bot: Bot):
         return await m.answer("لینک کانال معتبر نیست 🤔\nمثل این بفرست:\n<code>https://t.me/channel</code>", reply_markup=kb)
     err = await check_channel(bot, mm.group(1))
     if err:
-        return await m.answer(f"❌ {err}\nلینک کانال عمومی دیگه‌ای بفرست.", reply_markup=kb)
+        return await m.answer(f"❌ {err}\nلینک یه کانال عمومی دیگه بفرست.", reply_markup=kb)
     await state.update_data(links=[f"https://t.me/{mm.group(1)}"])
     await state.set_state(LastX.count)
-    await m.answer("✅ کانال تایید شد.\n\nسین برای <b>چند پست آخر</b> ثبت بشه؟ (۱ تا ۱۰۰)",
+    await m.answer("✅ کانال تایید شد.\n\n"
+                   "🔢 <b>مرحله ۲ از ۳:</b> سین روی <b>چند پست آخر</b> کانال ثبت بشه؟\n"
+                   "یه عدد بین ۱ تا ۱۰۰ بنویس و بفرست، یا یکی از دکمه‌ها رو بزن 👇",
                    reply_markup=qty_keyboard(1, 100, "lx", LASTX_PRESETS))
 
 
@@ -1366,10 +1418,15 @@ async def process_lastx_count(msg: Message, state: FSMContext, n):
     if n is None or not 1 <= n <= 100:
         return await msg.answer("یه عدد بین ۱ تا ۱۰۰ بفرست 🙏", reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
+    price = int(await get_setting("price_per_1000"))
     await state.update_data(posts=n)
     await state.set_state(LastX.qty)
-    await msg.answer(f"✅ {n} پست آخر.\n\n👁 تعداد سین <b>هر پست</b> رو انتخاب کن یا تایپ کن ({fmt(lo)} تا {fmt(hi)}):",
-                     reply_markup=qty_keyboard(lo, hi, "qty", QTY_PRESETS))
+    await msg.answer(f"✅ {n} پست آخر.\n\n"
+                     "👁 <b>مرحله ۳ از ۳:</b> تعداد سین برای <b>هر پست</b> رو به‌صورت عدد بنویس و بفرست.\n"
+                     "مثال: <code>1000</code>\n\n"
+                     f"📌 حداقل {fmt(lo)} و حداکثر {fmt(hi)}\n"
+                     f"💡 هر ۱۰۰۰ سین = {fmt(price)} تومان",
+                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
 @router.message(LastX.count, F.text)
@@ -1415,10 +1472,11 @@ async def like_start(m: Message, state: FSMContext):
         return await m.answer(MAINT_TEXT)
     await state.set_state(Like.link)
     await m.answer("🗳 <b>رأی نظرسنجی</b>\n\n"
-                   f"💵 قیمت هر ۱۰۰ رأی: <b>{fmt(await like_price())}</b> تومان\n\n"
-                   "لینک پستِ نظرسنجی (یا پستی که دکمه‌ی انتخاب داره) رو بفرست.\n"
-                   "مثال:\n<code>https://t.me/channel/123</code>\n\n"
-                   "⚠️ فقط کانال‌های <b>عمومی</b> پشتیبانی می‌شن.",
+                   "وقتی زیر پستت نظرسنجی (یا دکمه‌ی انتخاب) هست و می‌خوای به یکی از گزینه‌ها رأی داده بشه، از این بخش استفاده کن.\n\n"
+                   f"💵 قیمت: هر ۱۰۰ رأی = <b>{fmt(await like_price())}</b> تومان\n\n"
+                   "🔗 <b>مرحله ۱ از ۴:</b> لینک پست رو بفرست.\n"
+                   "مثال: <code>https://t.me/channel/123</code>\n\n"
+                   "⚠️ کانال باید <b>عمومی</b> باشه (آیدی @ داشته باشه).",
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
@@ -1429,7 +1487,9 @@ async def like_link(m: Message, state: FSMContext, bot: Bot):
         return
     await state.update_data(links=[r[0][0]])
     await state.set_state(Like.row)
-    await m.answer("گزینه‌ی مورد نظر توی <b>چندمین سطر</b>ـه؟ (از ۱ شروع می‌شه)\nمثلاً گزینه‌ی اول = ۱",
+    await m.answer("📍 <b>مرحله ۲ از ۴:</b> گزینه‌ی مورد نظرت توی <b>کدوم ردیف</b>ـه؟\n\n"
+                   "ردیف‌ها رو از بالا بشمار؛ ردیف اول = ۱.\n"
+                   "مثلاً اگه می‌خوای به گزینه‌ی دوم رأی بدی، ۲ رو بزن. عدد رو بنویس یا از دکمه‌ها انتخاب کن 👇",
                    reply_markup=qty_keyboard(1, 100, "lrow", [1, 2, 3, 4, 5, 6]))
 
 
@@ -1438,7 +1498,8 @@ async def like_set_row(msg: Message, state: FSMContext, n):
         return await msg.answer("یه عدد بین ۱ تا ۱۰۰ بفرست 🙏", reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     await state.update_data(row=n)
     await state.set_state(Like.col)
-    await msg.answer("و توی <b>چندمین ستون</b>؟ (از ۱ شروع می‌شه؛ اگه فقط یه ستون داره ۱ رو بزن)",
+    await msg.answer("↔️ <b>مرحله ۳ از ۴:</b> توی اون ردیف، گزینه <b>چندمین ستون</b>ـه؟\n\n"
+                     "اگه هر ردیف فقط یه گزینه داره (حالت معمولِ نظرسنجی)، ۱ رو بزن 👇",
                      reply_markup=qty_keyboard(1, 100, "lcol", [1, 2, 3, 4]))
 
 
@@ -1458,8 +1519,11 @@ async def like_set_col(msg: Message, state: FSMContext, n):
         return await msg.answer("یه عدد بین ۱ تا ۱۰۰ بفرست 🙏", reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     await state.update_data(col=n)
     await state.set_state(Like.qty)
-    await msg.answer(f"🔢 تعداد رأی رو انتخاب کن یا تایپ کن ({fmt(LIKE_MIN)} تا {fmt(LIKE_MAX)}):",
-                     reply_markup=qty_keyboard(LIKE_MIN, LIKE_MAX, "lqty", REACT_QTY_PRESETS))
+    await msg.answer("🔢 <b>مرحله ۴ از ۴:</b> چند تا رأی ثبت بشه؟ به‌صورت عدد بنویس و بفرست.\n"
+                     "مثال: <code>50</code>\n\n"
+                     f"📌 حداقل {fmt(LIKE_MIN)} و حداکثر {fmt(LIKE_MAX)}\n"
+                     f"💡 هر ۱۰۰ رأی = {fmt(await like_price())} تومان",
+                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
 
 
 @router.message(Like.col, F.text)
@@ -1475,7 +1539,7 @@ async def like_col_cb(c: CallbackQuery, state: FSMContext):
 
 async def process_like_qty(msg: Message, state: FSMContext, uid: int, qty):
     if qty is None or not LIKE_MIN <= qty <= LIKE_MAX:
-        return await msg.answer(f"تعداد باید بین <b>{fmt(LIKE_MIN)}</b> و <b>{fmt(LIKE_MAX)}</b> باشه 🙏\nدوباره بفرست:",
+        return await msg.answer(f"تعداد باید یه <b>عدد</b> بین <b>{fmt(LIKE_MIN)}</b> و <b>{fmt(LIKE_MAX)}</b> باشه 🙏\nدوباره بنویس و بفرست:",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
     d = await state.get_data()
     if not d.get("links") or not d.get("row") or not d.get("col"):
