@@ -24,6 +24,7 @@ from aiogram.types import (CallbackQuery, ErrorEvent, InlineKeyboardButton,
                            InlineKeyboardMarkup, KeyboardButton, Message,
                            ReplyKeyboardMarkup)
 from dotenv import load_dotenv
+from yarl import URL
 
 load_dotenv()
 
@@ -32,7 +33,9 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 PROVIDER_URL = os.getenv("PROVIDER_URL", "")
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 SERVICE_ID = os.getenv("SERVICE_ID", "")
-PROVIDER_METHOD = os.getenv("PROVIDER_METHOD", "GET").upper()  # GET یا POST
+PROVIDER_METHOD = os.getenv("PROVIDER_METHOD", "GET").upper()  # GET یا POST (فقط برای نوع smm)
+PROVIDER_TYPE = os.getenv("PROVIDER_TYPE", "smm").lower()  # smm (استاندارد پنل‌های SMM) یا actionseen
+COIN_TOMAN = float(os.getenv("COIN_TOMAN", "0.38"))  # ارزش هر سکه (فقط برای نمایش موجودی actionseen)
 FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "")  # مثلا @mychannel ، خالی = غیرفعال
 DATABASE_URL = os.environ["DATABASE_URL"]
 MIN_TOPUP = int(os.getenv("MIN_TOPUP", "10000"))
@@ -67,6 +70,8 @@ STATUS_FA = {
     "Canceled": "❌ لغو (برگشت پول)", "Cancelled": "❌ لغو (برگشت پول)",
     "Refunded": "❌ برگشت پول", "Fail": "❌ ناموفق", "Failed": "❌ ناموفق",
 }
+STATUS_ALIASES = {"done": "Completed", "completed": "Completed", "canceled": "Canceled", "cancelled": "Canceled",
+                  "pending": "Pending", "in progress": "In progress", "processing": "Processing", "partial": "Partial"}
 REFUND_STATUSES = {"Canceled", "Cancelled", "Refunded", "Fail", "Failed"}
 
 BTN_ORDER, BTN_CHARGE, BTN_ACC = "🛒 ثبت سفارش سین", "💰 شارژ کیف پول", "👤 حساب من"
@@ -193,6 +198,21 @@ def to_int(s):
 
 # ───────────────────────── provider ─────────────────────────
 async def provider(**params):
+    """کلاینت provider. خروجی همیشه JSON ـه.
+    نوع smm: فرمت استاندارد (action=add/status/balance).
+    نوع actionseen: همون سه عمل به فرمت وبسرویس اکشن‌سین ترجمه می‌شه (لینک باید خام و بدون کدگذاری برود)."""
+    if PROVIDER_TYPE == "actionseen":
+        act = params["action"]
+        if act == "add":
+            q = f"action=view&link={params['link']}&quantity={params['quantity']}"
+        elif act == "status":
+            q = f"action=view&order={params['order']}"
+        else:
+            q = f"action={act}"
+        url = URL(f"{PROVIDER_URL.rstrip('/')}/?key={PROVIDER_KEY}&{q}", encoded=True)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+            async with s.get(url) as r:
+                return await r.json(content_type=None)
     data = {"key": PROVIDER_KEY, **params}
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
         req = s.post(PROVIDER_URL, data=data) if PROVIDER_METHOD == "POST" else s.get(PROVIDER_URL, params=data)
@@ -255,6 +275,7 @@ async def sync_order(o):
     st = res.get("status") if isinstance(res, dict) else None
     if not st:
         return None
+    st = STATUS_ALIASES.get(str(st).lower(), st)
     refund, final = 0, True
     if st == "Completed":
         pass
@@ -797,7 +818,9 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
         return await c.answer()
     await c.message.edit_text("⏳ در حال ثبت سفارش...")
     done, errors, unknown = 0, [], []
-    for link in d["links"]:
+    for i, link in enumerate(d["links"]):
+        if i:
+            await asyncio.sleep(0.5)
         st, info = await place_order(uid, link, d["qty"], d["link_cost"])
         if st == "ok":
             done += 1
@@ -1112,7 +1135,9 @@ async def cmd_limits(m: Message, command: CommandObject):
 async def provider_balance_text():
     try:
         res = await provider(action="balance")
-        return f"💼 موجودی provider: {res.get('balance')} {res.get('currency', '')}"
+        bal, cur = res.get("balance"), str(res.get("currency", ""))
+        extra = f" ≈ {fmt(float(bal) * COIN_TOMAN)} تومان" if cur.lower() == "coin" and bal is not None else ""
+        return f"💼 موجودی provider: {bal} {cur}{extra}"
     except Exception as e:
         return f"خطا: {html.escape(str(e))}"
 
