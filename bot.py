@@ -55,11 +55,14 @@ DEFAULTS = {
     "brand": os.getenv("BRAND_NAME", "Nexor"),
     "support": os.getenv("SUPPORT_USERNAME", ""),
     "react_price_per_100": os.getenv("DEFAULT_REACT_PRICE", "4000"),
+    "like_price_per_100": os.getenv("DEFAULT_LIKE_PRICE", "4000"),
     "maintenance": "0",
 }
 
 REACT_ENABLED = PROVIDER_TYPE == "actionseen"  # ریکشن فقط با API اکشن‌سین
 REACT_MIN, REACT_MAX = 10, 10000
+LIKE_MIN, LIKE_MAX = 10, 10000
+EXTRAS = REACT_ENABLED  # قابلیت‌های اضافه‌ی API اکشن‌سین (ریکشن، رأی، چند پست آخر، ارسال تدریجی، لغو)
 COINS_PER_REACTION = 50
 IR_OFFSET = 12600  # UTC+3:30
 # هزینه‌ی خرید از provider (تومان) برای گزارش سود؛ برای اکشن‌سین از روی سکه حساب می‌شه
@@ -89,16 +92,20 @@ REFUND_STATUSES = {"Canceled", "Cancelled", "Refunded", "Fail", "Failed"}
 BTN_ORDER, BTN_CHARGE, BTN_ACC = "🛒 ثبت سفارش سین", "💰 شارژ کیف پول", "👤 حساب من"
 BTN_ORDERS, BTN_SUPPORT, BTN_HELP = "📦 سفارش‌های من", "💬 پشتیبانی", "📖 راهنما و قوانین"
 BTN_REACT = "👍 ثبت ریکشن"
+BTN_LAST, BTN_LIKE = "📚 سین چند پست آخر", "🗳 رأی نظرسنجی"
+_menu_rows = [[KeyboardButton(text=BTN_ORDER)]]
+if EXTRAS:
+    _menu_rows = [[KeyboardButton(text=BTN_ORDER), KeyboardButton(text=BTN_LAST)],
+                  [KeyboardButton(text=BTN_REACT), KeyboardButton(text=BTN_LIKE)]]
 MENU = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_ORDER)] + ([KeyboardButton(text=BTN_REACT)] if REACT_ENABLED else []),
-              [KeyboardButton(text=BTN_CHARGE), KeyboardButton(text=BTN_ACC)],
-              [KeyboardButton(text=BTN_ORDERS), KeyboardButton(text=BTN_SUPPORT)],
-              [KeyboardButton(text=BTN_HELP)]],
+    keyboard=_menu_rows + [[KeyboardButton(text=BTN_CHARGE), KeyboardButton(text=BTN_ACC)],
+                           [KeyboardButton(text=BTN_ORDERS), KeyboardButton(text=BTN_SUPPORT)],
+                           [KeyboardButton(text=BTN_HELP)]],
     resize_keyboard=True,
     input_field_placeholder="از منوی پایین انتخاب کن 👇",
 )
 
-MENU_TEXTS = {BTN_ORDER, BTN_REACT, BTN_CHARGE, BTN_ACC, BTN_ORDERS, BTN_SUPPORT, BTN_HELP}
+MENU_TEXTS = {BTN_ORDER, BTN_LAST, BTN_REACT, BTN_LIKE, BTN_CHARGE, BTN_ACC, BTN_ORDERS, BTN_SUPPORT, BTN_HELP}
 
 router = Router()
 IS_ADMIN = F.from_user.id.in_(ADMIN_IDS)
@@ -155,6 +162,8 @@ SCHEMA = [
     "ALTER TABLE topups ADD COLUMN IF NOT EXISTS receipt_uid TEXT",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'view'",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS emoji TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS posts INTEGER DEFAULT 1",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS opt TEXT",
     "CREATE TABLE IF NOT EXISTS ledger(id BIGSERIAL PRIMARY KEY, user_id BIGINT, amount BIGINT, reason TEXT, ts BIGINT)",
 ]
 
@@ -215,19 +224,21 @@ def to_int(s):
 async def provider(**params):
     """کلاینت provider. خروجی همیشه JSON ـه.
     نوع smm: فرمت استاندارد (action=add/status/balance).
-    نوع actionseen: همون عمل‌ها به فرمت وبسرویس اکشن‌سین ترجمه می‌شه (لینک باید خام و بدون کدگذاری برود).
-    kind=view|reaction و emoji فقط برای اکشن‌سین معنی دارن."""
+    نوع actionseen: عمل‌ها به فرمت وبسرویس اکشن‌سین ترجمه می‌شن (لینک باید خام و بدون کدگذاری برود).
+    kind=view|reaction|like ، emoji و opts (پارامترهای اختیاری مثل lastxpost, interval, vpi, speed, row, column) فقط برای اکشن‌سین‌ان."""
     kind = params.pop("kind", "view") or "view"
     emoji = params.pop("emoji", None)
+    opts = params.pop("opts", None) or {}
     if PROVIDER_TYPE == "actionseen":
         act = params["action"]
-        svc = "reaction" if kind == "reaction" else "view"
-        if act == "add" and kind == "reaction":
-            q = f"action=reaction&link={params['link']}&quantity={params['quantity']}&text={quote(emoji or '👍')}"
+        svc = kind if kind in ("view", "reaction", "like") else "view"
+        extra = "".join(f"&{k}={int(v)}" for k, v in opts.items())
+        if act == "add" and svc == "reaction":
+            q = f"action=reaction&link={params['link']}&quantity={params['quantity']}&text={quote(emoji or '👍')}{extra}"
         elif act == "add":
-            q = f"action=view&link={params['link']}&quantity={params['quantity']}"
-        elif act == "status":
-            q = f"action={svc}&order={params['order']}"
+            q = f"action={svc}&link={params['link']}&quantity={params['quantity']}{extra}"
+        elif act in ("status", "cancel"):
+            q = f"action={svc if act == 'status' else 'cancel'}&order={params['order']}"
         else:
             q = f"action={act}"
         url = URL(f"{PROVIDER_URL.rstrip('/')}/?key={PROVIDER_KEY}&{q}", encoded=True)
@@ -261,25 +272,44 @@ async def report_error(bot, where, exc):
     await notify_admins(bot, f"🚨 خطا در ربات ({where})\n<pre>{html.escape(tb)}</pre>")
 
 
-async def place_order(uid, link, qty, cost, kind="view", emoji=None):
+async def place_order(uid, link, qty, cost, kind="view", emoji=None, posts=1, opts=None, opt=None):
     """نتیجه: ("ok", شماره‌ی provider) | ("failed", متن خطا) | ("unknown", شماره‌ی سفارش داخلی).
     unknown یعنی معلوم نیست provider سفارش رو ثبت کرده یا نه؛ پول برنمی‌گرده تا ادمین بررسی کنه."""
     res, err = None, ""
     try:
-        res = await provider(action="add", service=SERVICE_ID, link=link, quantity=qty, kind=kind, emoji=emoji)
+        for e_try in (emoji_variants(emoji) if kind == "reaction" and emoji else [emoji]):
+            res = await provider(action="add", service=SERVICE_ID, link=link, quantity=qty, kind=kind, emoji=e_try, opts=opts)
+            bad_emoji = isinstance(res, dict) and "Invalid reaction emoji" in str(res.get("error", ""))
+            if not (kind == "reaction" and bad_emoji):
+                emoji = e_try
+                break
     except aiohttp.ClientConnectorError as e:  # اصلاً به provider وصل نشده → مطمئنیم ثبت نشده
         return "failed", str(e)
     except Exception as e:
         err = str(e) or type(e).__name__
     now = int(time.time())
-    ins = "INSERT INTO orders(user_id,link,quantity,cost,provider_order,status,created,kind,emoji) VALUES (?,?,?,?,?,?,?,?,?)"
+    ins = "INSERT INTO orders(user_id,link,quantity,cost,provider_order,status,created,kind,emoji,posts,opt) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
     if isinstance(res, dict) and "order" in res:
-        await db.execute(ins, (uid, link, qty, cost, str(res["order"]), "Pending", now, kind, emoji))
+        await db.execute(ins, (uid, link, qty, cost, str(res["order"]), "Pending", now, kind, emoji, posts, opt))
         return "ok", res["order"]
     if isinstance(res, dict) and res.get("error"):
         return "failed", str(res["error"])
-    oid = await db.insert(ins, (uid, link, qty, cost, "", "Unknown", now, kind, emoji))
+    oid = await db.insert(ins, (uid, link, qty, cost, "", "Unknown", now, kind, emoji, posts, opt))
     return "unknown", oid
+
+
+def calc_refund(o, res, st):
+    """مبلغ برگشتی (تومان). remains در اکشن‌سین سکه‌ست: هر سین ۱ سکه، هر ریکشن/رأی ۵۰ سکه."""
+    total = max(1, o["quantity"] * (o.get("posts") or 1))
+    try:
+        remains = int(float(res.get("remains") or 0))
+    except (TypeError, ValueError):
+        remains = 0
+    if PROVIDER_TYPE == "actionseen" and (o["kind"] or "view") in ("reaction", "like"):
+        remains //= COINS_PER_REACTION
+    if st == "Partial" or (st == "Canceled" and PROVIDER_TYPE == "actionseen" and remains > 0):
+        return o["cost"] * min(remains, total) // total
+    return o["cost"]
 
 
 async def sync_order(o):
@@ -297,13 +327,8 @@ async def sync_order(o):
     refund, final = 0, True
     if st == "Completed":
         pass
-    elif st in REFUND_STATUSES:
-        refund = o["cost"]
-    elif st == "Partial":
-        remains = int(float(res.get("remains") or 0))
-        if PROVIDER_TYPE == "actionseen" and o["kind"] == "reaction":
-            remains //= COINS_PER_REACTION  # remains به سکه‌ست و هر ریکشن ۵۰ سکه
-        refund = o["cost"] * min(remains, o["quantity"]) // o["quantity"]
+    elif st in REFUND_STATUSES or st == "Partial":
+        refund = calc_refund(o, res, st)
     else:
         final = False
     if final:
@@ -319,6 +344,27 @@ async def sync_order(o):
     return st, refund, final
 
 
+async def notify_order_result(bot, o, r):
+    """بعد از نهایی شدن سفارش، به مشتری خبر می‌ده. اگه کامل شده باشه یه متن و بعدش جدا یه 😜 می‌فرسته."""
+    st, refund, _final = r
+    if st == "Completed":
+        brand = html.escape(await get_setting("brand"))
+        text = (f"🎉 <b>سفارشت کامل شد!</b>\n\n"
+                f"📦 سفارش #{o['id']} • {order_label(o)}\n"
+                f"🔗 {o['link']}\n\n"
+                f"مرسی که {brand} رو انتخاب کردی 💙\n"
+                "اگه راضی بودی، سفارش بعدی رو هم همین‌جا ثبت کن؛ و اگه سوالی داشتی، پشتیبانی کنارته.")
+        with suppress(Exception):
+            await bot.send_message(o["user_id"], text, disable_web_page_preview=True)
+            await bot.send_message(o["user_id"], "😜")
+        return
+    msg = f"📦 سفارش #{o['id']}: {STATUS_FA.get(st, st)}"
+    if refund:
+        msg += f"\n💰 {refund:,} تومان به کیف پولت برگشت."
+    with suppress(Exception):
+        await bot.send_message(o["user_id"], msg)
+
+
 async def poll_orders(bot):
     while True:
         await asyncio.sleep(600)
@@ -326,11 +372,7 @@ async def poll_orders(bot):
             for o in await many("SELECT * FROM orders WHERE settled=0 AND provider_order<>'' LIMIT 200"):
                 r = await sync_order(o)
                 if r and r[2]:
-                    msg = f"📦 سفارش #{o['id']}: {STATUS_FA.get(r[0], r[0])}"
-                    if r[1]:
-                        msg += f"\n💰 {r[1]:,} تومان به کیف پولت برگشت."
-                    with suppress(Exception):
-                        await bot.send_message(o["user_id"], msg)
+                    await notify_order_result(bot, o, r)
             if LOW_PROVIDER_BALANCE:
                 res = await provider(action="balance")
                 if float(res.get("balance", 0)) < LOW_PROVIDER_BALANCE:
@@ -388,8 +430,13 @@ def day_range(day):
 
 
 def order_label(o):
-    if (o["kind"] or "view") == "reaction":
+    k = o["kind"] or "view"
+    if k == "reaction":
         return f"{o['emoji'] or '👍'} {fmt(o['quantity'])} ریکشن"
+    if k == "like":
+        return f"🗳 {fmt(o['quantity'])} رأی"
+    if (o.get("posts") or 1) > 1:
+        return f"{fmt(o['quantity'])} سین × {o['posts']} پست"
     return f"{fmt(o['quantity'])} سین"
 
 
@@ -409,13 +456,13 @@ def ledger_label(reason):
 
 async def build_report(start, end, title):
     rows = await many(
-        "SELECT COALESCE(kind,'view') AS kind, COUNT(*) AS n, COALESCE(SUM(quantity),0) AS q, COALESCE(SUM(cost),0) AS c "
+        "SELECT COALESCE(kind,'view') AS kind, COUNT(*) AS n, COALESCE(SUM(quantity*COALESCE(posts,1)),0) AS q, COALESCE(SUM(cost),0) AS c "
         "FROM orders WHERE created>=? AND created<? AND status NOT IN ('Canceled','Refunded','Fail','Failed') GROUP BY 1",
         (start, end))
     n_orders = sum(int(r["n"]) for r in rows)
     revenue = sum(int(r["c"]) for r in rows)
-    views = sum(int(r["q"]) for r in rows if r["kind"] != "reaction")
-    reacts = sum(int(r["q"]) for r in rows if r["kind"] == "reaction")
+    views = sum(int(r["q"]) for r in rows if r["kind"] == "view")
+    reacts = sum(int(r["q"]) for r in rows if r["kind"] != "view")
     cost = views / 1000 * COST_VIEW_PER_1000 + reacts / 100 * COST_REACT_PER_100
     cost_known = COST_VIEW_PER_1000 > 0 or not views
     top = await one("SELECT COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM ledger WHERE reason LIKE 'topup-%' AND ts>=? AND ts<?", (start, end))
@@ -943,36 +990,129 @@ async def order_links(m: Message, state: FSMContext, bot: Bot):
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
+# ───────────────────────── خلاصه‌ی سفارش، سرعت و ارسال تدریجی ─────────────────────────
+DRIP_CHOICES = [(0, "⚡ سریع"), (180, "🐢 ۳ ساعته"), (360, "🐢 ۶ ساعته"), (720, "🐢 ۱۲ ساعته"), (1440, "🐢 ۲۴ ساعته")]
+SPEED_CHOICES = [(1, "⚡ سریع"), (5, "🐢 هر ۵ دقیقه"), (15, "🐢 هر ۱۵ دقیقه"), (30, "🐢 هر ۳۰ دقیقه")]
+
+
+def drip_params(qty, minutes):
+    """«طی N دقیقه» رو به interval/vpi اکشن‌سین تبدیل می‌کنه (vpi حداقل ۱۰ و interval بین ۱ تا ۱۴۴۰ دقیقه)."""
+    if not minutes:
+        return {}
+    interval = 15 if minutes >= 90 else 5
+    steps = max(1, minutes // interval)
+    return {"interval": interval, "vpi": max(10, math.ceil(qty / steps))}
+
+
+def drip_actual_minutes(qty, minutes):
+    p = drip_params(qty, minutes)
+    return math.ceil(qty / p["vpi"]) * p["interval"] if p else 0
+
+
+def fmt_minutes(m):
+    return f"حدود {m} دقیقه" if m < 90 else f"حدود {round(m / 60)} ساعت"
+
+
+def build_opts(d, kind):
+    if not EXTRAS:
+        return {}
+    o = {}
+    if kind == "view":
+        if d.get("posts", 1) > 1:
+            o["lastxpost"] = d["posts"]
+        o.update(drip_params(d["qty"], d.get("drip", 0)))
+    else:
+        if d.get("speed", 1) != 1:
+            o["speed"] = d["speed"]
+        if kind == "like":
+            o["row"], o["column"] = d["row"], d["col"]
+    return o
+
+
+def speed_rows(kind, d):
+    if not EXTRAS:
+        return []
+    if kind == "view":
+        cur, items = d.get("drip", 0), [(f"drip:{m}", t, m) for m, t in DRIP_CHOICES]
+    else:
+        cur, items = d.get("speed", 1), [(f"spd:{n}", t, n) for n, t in SPEED_CHOICES]
+    btns = [InlineKeyboardButton(text=("✅ " if v == cur else "") + t, callback_data=cb) for cb, t, v in items]
+    return [btns[i:i + 2] for i in range(0, len(btns), 2)]
+
+
+async def show_summary(msg: Message, state: FSMContext, uid: int, edit=False):
+    d = await state.get_data()
+    kind, links, posts = d.get("kind", "view"), d.get("links") or [], d.get("posts", 1)
+    qty, link_cost, total = d["qty"], d["link_cost"], d["total"]
+    bal = (await one("SELECT balance FROM users WHERE id=?", (uid,)))["balance"]
+    if kind == "reaction":
+        head = "🧾 <b>خلاصه‌ی سفارش ریکشن</b>\n\n"
+        lines = [f"📌 تعداد پست: {len(links)}", f"{d['emoji']} ریکشن هر پست: {fmt(qty)}"]
+    elif kind == "like":
+        head = "🧾 <b>خلاصه‌ی سفارش رأی</b>\n\n"
+        lines = [f"📌 پست: {links[0]}", f"🗳 گزینه: سطر {d['row']}، ستون {d['col']}", f"👍 تعداد رأی: {fmt(qty)}"]
+    elif posts > 1:
+        head = "🧾 <b>خلاصه‌ی سفارش سین</b>\n\n"
+        lines = [f"📚 {posts} پست آخر کانال: {links[0]}", f"👁 سین هر پست: {fmt(qty)}"]
+    else:
+        head = "🧾 <b>خلاصه‌ی سفارش سین</b>\n\n"
+        lines = [f"📌 تعداد پست: {len(links)}", f"👁 سین هر پست: {fmt(qty)}"]
+    if EXTRAS:
+        if kind == "view":
+            dm = d.get("drip", 0)
+            lines.append("⚡ سرعت: حداکثر" if not dm else f"🐢 ارسال تدریجی: {fmt_minutes(drip_actual_minutes(qty, dm))}")
+        else:
+            sp = d.get("speed", 1)
+            lines.append("⚡ سرعت: حداکثر" if sp == 1 else f"🐢 هر {sp} دقیقه یک بخش")
+    lines.append(f"💵 هزینه‌ی هر پست: {fmt(link_cost // posts)} تومان" if kind != "like" else f"💵 هزینه: {fmt(link_cost)} تومان")
+    text = head + "\n".join(lines) + f"\n━━━━━━━━━━\n💰 <b>جمع کل: {fmt(total)} تومان</b>\n👛 موجودی تو: {fmt(bal)} تومان"
+    if bal < total:
+        await state.clear()
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 شارژ کیف پول", callback_data="go_charge")]])
+        return await msg.answer(text + f"\n\n❌ موجودی کافی نیست. برای این سفارش <b>{fmt(total - bal)}</b> تومان دیگه لازمه.", reply_markup=kb)
+    rows = [[InlineKeyboardButton(text="✅ تایید و ثبت سفارش", callback_data="ord_ok"),
+             InlineKeyboardButton(text="❌ انصراف", callback_data="ord_no")]] + speed_rows(kind, d)
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    text += "\n\nاگه همه‌چی درسته، تایید رو بزن 👇"
+    if edit:
+        with suppress(Exception):
+            await msg.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        return
+    await msg.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.startswith("drip:"))
+async def set_drip(c: CallbackQuery, state: FSMContext):
+    if "qty" not in await state.get_data():
+        return await c.answer("این سفارش منقضی شده؛ دوباره ثبت کن.", show_alert=True)
+    await state.update_data(drip=int(c.data.split(":")[1]))
+    await c.answer()
+    await show_summary(c.message, state, c.from_user.id, edit=True)
+
+
+@router.callback_query(F.data.startswith("spd:"))
+async def set_speed(c: CallbackQuery, state: FSMContext):
+    if "qty" not in await state.get_data():
+        return await c.answer("این سفارش منقضی شده؛ دوباره ثبت کن.", show_alert=True)
+    await state.update_data(speed=int(c.data.split(":")[1]))
+    await c.answer()
+    await show_summary(c.message, state, c.from_user.id, edit=True)
+
+
 async def process_qty(msg: Message, state: FSMContext, uid: int, qty):
     lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
     if qty is None or not lo <= qty <= hi:
         return await msg.answer(f"تعداد باید بین <b>{fmt(lo)}</b> و <b>{fmt(hi)}</b> باشه 🙏\nدوباره بفرست:",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
-    links = (await state.get_data()).get("links")
+    d = await state.get_data()
+    links, posts = d.get("links"), d.get("posts", 1)
     if not links:
         await state.clear()
         return await msg.answer("این سفارش منقضی شده؛ دوباره از «🛒 ثبت سفارش سین» شروع کن.")
     price = int(await get_setting("price_per_1000"))
-    link_cost = math.ceil(qty * price / 1000)
-    total = link_cost * len(links)
-    bal = (await one("SELECT balance FROM users WHERE id=?", (uid,)))["balance"]
-    await state.update_data(qty=qty, link_cost=link_cost, total=total)
-    text = ("🧾 <b>خلاصه‌ی سفارش</b>\n\n"
-            f"📌 تعداد پست: {len(links)}\n"
-            f"👁 سین هر پست: {fmt(qty)}\n"
-            f"💵 هزینه‌ی هر پست: {fmt(link_cost)} تومان\n"
-            "━━━━━━━━━━\n"
-            f"💰 <b>جمع کل: {fmt(total)} تومان</b>\n"
-            f"👛 موجودی تو: {fmt(bal)} تومان")
-    if bal < total:
-        await state.clear()
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 شارژ کیف پول", callback_data="go_charge")]])
-        return await msg.answer(text + f"\n\n❌ موجودی کافی نیست. برای این سفارش <b>{fmt(total - bal)}</b> تومان دیگه لازمه.",
-                                reply_markup=kb)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ تایید و ثبت سفارش", callback_data="ord_ok"),
-        InlineKeyboardButton(text="❌ انصراف", callback_data="ord_no")]])
-    await msg.answer(text + "\n\nاگه همه‌چی درسته، تایید رو بزن 👇", reply_markup=kb)
+    link_cost = math.ceil(qty * price / 1000) * posts
+    await state.update_data(qty=qty, link_cost=link_cost, total=link_cost * len(links), kind="view", posts=posts)
+    await show_summary(msg, state, uid)
 
 
 @router.message(Order.qty, F.text)
@@ -1003,9 +1143,11 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
     if await is_maintenance() and uid not in ADMIN_IDS:
         await c.message.edit_text(MAINT_TEXT)
         return await c.answer()
-    kind, emoji = d.get("kind", "view"), d.get("emoji")
-    unit = "ریکشن" if kind == "reaction" else "سین"
-    if not await try_spend(uid, d["total"], "order-reaction" if kind == "reaction" else "order"):
+    kind, emoji, posts = d.get("kind", "view"), d.get("emoji"), d.get("posts", 1)
+    unit = {"reaction": "ریکشن", "like": "رأی"}.get(kind, "سین")
+    opts = build_opts(d, kind)
+    opt = f"{d['row']},{d['col']}" if kind == "like" else None
+    if not await try_spend(uid, d["total"], {"reaction": "order-reaction", "like": "order-like"}.get(kind, "order")):
         await c.message.edit_text("❌ موجودی کافی نیست.")
         return await c.answer()
     await c.message.edit_text("⏳ در حال ثبت سفارش...")
@@ -1013,7 +1155,7 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
     for i, link in enumerate(d["links"]):
         if i:
             await asyncio.sleep(0.5)
-        st, info = await place_order(uid, link, d["qty"], d["link_cost"], kind, emoji)
+        st, info = await place_order(uid, link, d["qty"], d["link_cost"], kind, emoji, posts, opts, opt)
         if st == "ok":
             done += 1
         elif st == "unknown":
@@ -1049,7 +1191,27 @@ class React(StatesGroup):
     qty = State()
 
 
-EMOJIS = ["👍", "❤️", "🔥", "🎉", "😁", "🤩", "👏", "😍", "🙏", "🥰", "💯", "🤣", "⚡️", "🏆", "👌", "🤝"]
+# همه‌ی ۷۳ ریکشن مجاز؛ پرکاربردها اول. ایموجی‌های ترکیبی با کد یونیکد نوشته شدن تا هیچ نویسه‌ی نامرئی‌ای گم نشه.
+EMOJIS = [
+    "👍", "\u2764\ufe0f", "🔥", "🎉", "😁", "🤩", "👏", "😍", "🙏", "🥰", "💯", "🤣", "\u26a1\ufe0f", "🏆", "👌", "🤝",
+    "👎", "🤔", "🤯", "😱", "🤬", "😢", "🤮", "💩", "\U0001F54A", "🤡", "🥱", "🥴", "🐳", "\u2764\ufe0f\u200d\U0001F525",
+    "🌚", "🌭", "🍌", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "\U0001F468\u200d\U0001F4BB",
+    "👀", "🎃", "🙈", "😇", "😨", "\u270d\ufe0f", "🤗", "🫡", "🎅", "🎄", "\u2603\ufe0f", "💅", "🤪", "🗿", "🆒", "💘",
+    "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "\U0001F937\u200d\u2642\ufe0f", "\U0001F937", "\U0001F937\u200d\u2640\ufe0f", "😡",
+]
+
+
+def emoji_variants(e):
+    """بعضی ایموجی‌ها با/بدون کاراکتر نامرئی FE0F نوشته می‌شن؛ اگه provider یکی رو رد کرد، حالت دیگه رو امتحان می‌کنیم."""
+    out = [e]
+    stripped = e.replace("\ufe0f", "")
+    if stripped != e:
+        out.append(stripped)
+    elif len(e) == 1:
+        out.append(e + "\ufe0f")
+    return out
+
+
 REACT_QTY_PRESETS = [10, 50, 100, 500]
 
 
@@ -1082,10 +1244,10 @@ async def react_links(m: Message, state: FSMContext, bot: Bot):
     links, note = r
     await state.update_data(links=links)
     await state.set_state(React.emoji)
-    rows = [[InlineKeyboardButton(text=e, callback_data=f"emo:{i}") for i, e in enumerate(EMOJIS) if k <= i < k + 4]
-            for k in range(0, len(EMOJIS), 4)]
+    rows = [[InlineKeyboardButton(text=e, callback_data=f"emo:{i}") for i, e in enumerate(EMOJIS) if k <= i < k + 6]
+            for k in range(0, len(EMOJIS), 6)]
     rows.append(cancel_row())
-    await m.answer(note + f"✅ {len(links)} پست دریافت شد.\n\nریکشن مورد نظرت رو انتخاب کن 👇",
+    await m.answer(note + f"✅ {len(links)} پست دریافت شد.\n\nریکشن مورد نظرت رو انتخاب کن (همه‌ی ریکشن‌های تلگرام هست) 👇",
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -1124,27 +1286,9 @@ async def process_react_qty(msg: Message, state: FSMContext, uid: int, qty):
     if not links or not emoji:
         await state.clear()
         return await msg.answer("این سفارش منقضی شده؛ دوباره از «👍 ثبت ریکشن» شروع کن.")
-    price = await react_price()
-    link_cost = math.ceil(qty * price / 100)
-    total = link_cost * len(links)
-    bal = (await one("SELECT balance FROM users WHERE id=?", (uid,)))["balance"]
-    await state.update_data(qty=qty, link_cost=link_cost, total=total, kind="reaction")
-    text = ("🧾 <b>خلاصه‌ی سفارش ریکشن</b>\n\n"
-            f"📌 تعداد پست: {len(links)}\n"
-            f"{emoji} ریکشن هر پست: {fmt(qty)}\n"
-            f"💵 هزینه‌ی هر پست: {fmt(link_cost)} تومان\n"
-            "━━━━━━━━━━\n"
-            f"💰 <b>جمع کل: {fmt(total)} تومان</b>\n"
-            f"👛 موجودی تو: {fmt(bal)} تومان")
-    if bal < total:
-        await state.clear()
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 شارژ کیف پول", callback_data="go_charge")]])
-        return await msg.answer(text + f"\n\n❌ موجودی کافی نیست. برای این سفارش <b>{fmt(total - bal)}</b> تومان دیگه لازمه.",
-                                reply_markup=kb)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ تایید و ثبت سفارش", callback_data="ord_ok"),
-        InlineKeyboardButton(text="❌ انصراف", callback_data="ord_no")]])
-    await msg.answer(text + "\n\nاگه همه‌چی درسته، تایید رو بزن 👇", reply_markup=kb)
+    link_cost = math.ceil(qty * await react_price() / 100)
+    await state.update_data(qty=qty, link_cost=link_cost, total=link_cost * len(links), kind="reaction", posts=1)
+    await show_summary(msg, state, uid)
 
 
 @router.message(React.qty, F.text)
@@ -1158,21 +1302,269 @@ async def react_qty_preset(c: CallbackQuery, state: FSMContext):
     await process_react_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
 
 
+# ───────────────────────── سین برای چند پست آخر کانال ─────────────────────────
+CH_RE = re.compile(r"https?://t\.me/([A-Za-z][A-Za-z0-9_]{3,})")
+LASTX_PRESETS = [3, 5, 10, 20, 50, 100]
+
+
+class LastX(StatesGroup):
+    link = State()
+    count = State()
+    qty = State()
+
+
+async def check_channel(bot, ch):
+    try:
+        chat = await bot.get_chat(f"@{ch}")
+    except TelegramBadRequest:
+        return "کانال پیدا نشد یا عمومی نیست"
+    except Exception:
+        return None
+    return None if chat.type == "channel" else "این لینک مربوط به یه کانال نیست"
+
+
+def qty_keyboard(lo, hi, prefix, presets):
+    pres = [q for q in presets if lo <= q <= hi]
+    rows = [[InlineKeyboardButton(text=fmt(q), callback_data=f"{prefix}:{q}") for q in pres[i:i + 2]] for i in range(0, len(pres), 2)]
+    rows.append(cancel_row())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(F.text == BTN_LAST)
+async def last_start(m: Message, state: FSMContext):
+    await state.clear()
+    if not EXTRAS:
+        return await m.answer("این سرویس فعلاً فعال نیست.")
+    if await is_maintenance() and m.from_user.id not in ADMIN_IDS:
+        return await m.answer(MAINT_TEXT)
+    price = int(await get_setting("price_per_1000"))
+    await state.set_state(LastX.link)
+    await m.answer("📚 <b>سین چند پست آخر کانال</b>\n\n"
+                   f"💵 قیمت هر ۱۰۰۰ سین: <b>{fmt(price)}</b> تومان\n\n"
+                   "لینک کانال عمومی رو بفرست، مثل:\n<code>https://t.me/channel</code>\n\n"
+                   "ربات خودش آخرین پست‌های کانال رو پیدا می‌کنه و برای همه‌شون سین ثبت می‌کنه.\n"
+                   "💰 هزینه = تعداد پست × سین هر پست",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+
+
+@router.message(LastX.link, F.text)
+async def last_link(m: Message, state: FSMContext, bot: Bot):
+    kb = InlineKeyboardMarkup(inline_keyboard=[cancel_row()])
+    mm = CH_RE.search(m.text or "")
+    if not mm:
+        return await m.answer("لینک کانال معتبر نیست 🤔\nمثل این بفرست:\n<code>https://t.me/channel</code>", reply_markup=kb)
+    err = await check_channel(bot, mm.group(1))
+    if err:
+        return await m.answer(f"❌ {err}\nلینک کانال عمومی دیگه‌ای بفرست.", reply_markup=kb)
+    await state.update_data(links=[f"https://t.me/{mm.group(1)}"])
+    await state.set_state(LastX.count)
+    await m.answer("✅ کانال تایید شد.\n\nسین برای <b>چند پست آخر</b> ثبت بشه؟ (۱ تا ۱۰۰)",
+                   reply_markup=qty_keyboard(1, 100, "lx", LASTX_PRESETS))
+
+
+async def process_lastx_count(msg: Message, state: FSMContext, n):
+    if n is None or not 1 <= n <= 100:
+        return await msg.answer("یه عدد بین ۱ تا ۱۰۰ بفرست 🙏", reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    lo, hi = int(await get_setting("min_qty")), int(await get_setting("max_qty"))
+    await state.update_data(posts=n)
+    await state.set_state(LastX.qty)
+    await msg.answer(f"✅ {n} پست آخر.\n\n👁 تعداد سین <b>هر پست</b> رو انتخاب کن یا تایپ کن ({fmt(lo)} تا {fmt(hi)}):",
+                     reply_markup=qty_keyboard(lo, hi, "qty", QTY_PRESETS))
+
+
+@router.message(LastX.count, F.text)
+async def last_count(m: Message, state: FSMContext):
+    await process_lastx_count(m, state, to_int(m.text))
+
+
+@router.callback_query(F.data.startswith("lx:"), LastX.count)
+async def last_count_cb(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await process_lastx_count(c.message, state, int(c.data.split(":")[1]))
+
+
+@router.message(LastX.qty, F.text)
+async def last_qty(m: Message, state: FSMContext):
+    await process_qty(m, state, m.from_user.id, to_int(m.text))
+
+
+@router.callback_query(F.data.startswith("qty:"), LastX.qty)
+async def last_qty_cb(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await process_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
+
+
+# ───────────────────────── رأی نظرسنجی / لایک ─────────────────────────
+class Like(StatesGroup):
+    link = State()
+    row = State()
+    col = State()
+    qty = State()
+
+
+async def like_price():
+    return int(await get_setting("like_price_per_100"))
+
+
+@router.message(F.text == BTN_LIKE)
+async def like_start(m: Message, state: FSMContext):
+    await state.clear()
+    if not EXTRAS:
+        return await m.answer("این سرویس فعلاً فعال نیست.")
+    if await is_maintenance() and m.from_user.id not in ADMIN_IDS:
+        return await m.answer(MAINT_TEXT)
+    await state.set_state(Like.link)
+    await m.answer("🗳 <b>رأی نظرسنجی</b>\n\n"
+                   f"💵 قیمت هر ۱۰۰ رأی: <b>{fmt(await like_price())}</b> تومان\n\n"
+                   "لینک پستِ نظرسنجی (یا پستی که دکمه‌ی انتخاب داره) رو بفرست.\n"
+                   "مثال:\n<code>https://t.me/channel/123</code>\n\n"
+                   "⚠️ فقط کانال‌های <b>عمومی</b> پشتیبانی می‌شن.",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+
+
+@router.message(Like.link, F.text)
+async def like_link(m: Message, state: FSMContext, bot: Bot):
+    r = await validate_links(m, bot, "like")
+    if not r:
+        return
+    await state.update_data(links=[r[0][0]])
+    await state.set_state(Like.row)
+    await m.answer("گزینه‌ی مورد نظر توی <b>چندمین سطر</b>ـه؟ (از ۱ شروع می‌شه)\nمثلاً گزینه‌ی اول = ۱",
+                   reply_markup=qty_keyboard(1, 100, "lrow", [1, 2, 3, 4, 5, 6]))
+
+
+async def like_set_row(msg: Message, state: FSMContext, n):
+    if n is None or not 1 <= n <= 100:
+        return await msg.answer("یه عدد بین ۱ تا ۱۰۰ بفرست 🙏", reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    await state.update_data(row=n)
+    await state.set_state(Like.col)
+    await msg.answer("و توی <b>چندمین ستون</b>؟ (از ۱ شروع می‌شه؛ اگه فقط یه ستون داره ۱ رو بزن)",
+                     reply_markup=qty_keyboard(1, 100, "lcol", [1, 2, 3, 4]))
+
+
+@router.message(Like.row, F.text)
+async def like_row(m: Message, state: FSMContext):
+    await like_set_row(m, state, to_int(m.text))
+
+
+@router.callback_query(F.data.startswith("lrow:"), Like.row)
+async def like_row_cb(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await like_set_row(c.message, state, int(c.data.split(":")[1]))
+
+
+async def like_set_col(msg: Message, state: FSMContext, n):
+    if n is None or not 1 <= n <= 100:
+        return await msg.answer("یه عدد بین ۱ تا ۱۰۰ بفرست 🙏", reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    await state.update_data(col=n)
+    await state.set_state(Like.qty)
+    await msg.answer(f"🔢 تعداد رأی رو انتخاب کن یا تایپ کن ({fmt(LIKE_MIN)} تا {fmt(LIKE_MAX)}):",
+                     reply_markup=qty_keyboard(LIKE_MIN, LIKE_MAX, "lqty", REACT_QTY_PRESETS))
+
+
+@router.message(Like.col, F.text)
+async def like_col(m: Message, state: FSMContext):
+    await like_set_col(m, state, to_int(m.text))
+
+
+@router.callback_query(F.data.startswith("lcol:"), Like.col)
+async def like_col_cb(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await like_set_col(c.message, state, int(c.data.split(":")[1]))
+
+
+async def process_like_qty(msg: Message, state: FSMContext, uid: int, qty):
+    if qty is None or not LIKE_MIN <= qty <= LIKE_MAX:
+        return await msg.answer(f"تعداد باید بین <b>{fmt(LIKE_MIN)}</b> و <b>{fmt(LIKE_MAX)}</b> باشه 🙏\nدوباره بفرست:",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    d = await state.get_data()
+    if not d.get("links") or not d.get("row") or not d.get("col"):
+        await state.clear()
+        return await msg.answer("این سفارش منقضی شده؛ دوباره از «🗳 رأی نظرسنجی» شروع کن.")
+    link_cost = math.ceil(qty * await like_price() / 100)
+    await state.update_data(qty=qty, link_cost=link_cost, total=link_cost, kind="like", posts=1)
+    await show_summary(msg, state, uid)
+
+
+@router.message(Like.qty, F.text)
+async def like_qty(m: Message, state: FSMContext):
+    await process_like_qty(m, state, m.from_user.id, to_int(m.text))
+
+
+@router.callback_query(F.data.startswith("lqty:"), Like.qty)
+async def like_qty_cb(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await process_like_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
+
+
 async def show_orders(msg: Message, uid: int, edit=False):
     for o in await many("SELECT * FROM orders WHERE user_id=? AND settled=0 AND provider_order<>'' ORDER BY id DESC LIMIT 10", (uid,)):
-        await sync_order(o)
+        r = await sync_order(o)
+        if r and r[2]:
+            await notify_order_result(msg.bot, o, r)
     rows = await many("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,))
     if not rows:
         return await msg.answer("هنوز سفارشی ثبت نکردی 🙂\nاز «🛒 ثبت سفارش سین» شروع کن 🚀")
     lines = [f"<b>#{o['id']}</b> • {order_label(o)} • {STATUS_FA.get(o['status'], o['status'])}\n🔗 {o['link']}"
              for o in rows]
     text = "📦 <b>سفارش‌های اخیر</b>\n\n" + "\n\n".join(lines)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="orders_refresh")]])
+    cancel_btns = [InlineKeyboardButton(text=f"❌ لغو #{o['id']}", callback_data=f"co:{o['id']}")
+                   for o in rows if EXTRAS and not o["settled"] and o["provider_order"]]
+    kb_rows = [cancel_btns[i:i + 3] for i in range(0, len(cancel_btns), 3)]
+    kb_rows.append([InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="orders_refresh")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     if edit:
         with suppress(Exception):
             return await msg.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         return
     await msg.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.startswith("co:"))
+async def cancel_ask(c: CallbackQuery):
+    oid = int(c.data.split(":")[1])
+    o = await one("SELECT * FROM orders WHERE id=? AND user_id=? AND settled=0 AND provider_order<>''", (oid, c.from_user.id))
+    if not o:
+        return await c.answer("این سفارش دیگه قابل لغو نیست.", show_alert=True)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ بله، لغو کن", callback_data=f"co_yes:{oid}"),
+        InlineKeyboardButton(text="↩️ نه", callback_data="co_no")]])
+    await c.answer()
+    await c.message.answer(f"❓ سفارش <b>#{oid}</b> ({order_label(o)}) لغو بشه؟\n"
+                           "بخش انجام‌نشده‌ش به کیف پولت برمی‌گرده؛ بخشی که قبلاً ارسال شده برنمی‌گرده.", reply_markup=kb)
+
+
+@router.callback_query(F.data == "co_no")
+async def cancel_no(c: CallbackQuery):
+    await c.answer()
+    with suppress(Exception):
+        await c.message.edit_text("باشه، سفارش ادامه پیدا می‌کنه 👍")
+
+
+@router.callback_query(F.data.startswith("co_yes:"))
+async def cancel_do(c: CallbackQuery, bot: Bot):
+    await c.answer()
+    oid = int(c.data.split(":")[1])
+    o = await one("SELECT * FROM orders WHERE id=? AND user_id=? AND settled=0 AND provider_order<>''", (oid, c.from_user.id))
+    if not o:
+        return await c.message.edit_text("این سفارش دیگه قابل لغو نیست.")
+    try:
+        res = await provider(action="cancel", order=o["provider_order"], kind=o["kind"] or "view")
+    except Exception:
+        return await c.message.edit_text("ارتباط با سرویس برقرار نشد؛ کمی بعد دوباره امتحان کن.")
+    err = str(res.get("error", "")) if isinstance(res, dict) else "bad response"
+    if "Already cancelled" in err:
+        text = "این سفارش قبلاً لغو شده."
+    elif "Not possible" in err:
+        text = "این سفارش دیگه قابل لغو نیست (احتمالاً کامل شده یا تقریباً تموم شده)."
+    elif err:
+        text = "لغو انجام نشد. اگه مشکل ادامه داشت به پشتیبانی پیام بده."
+    else:
+        text = "✅ درخواست لغو ارسال شد. هزینه‌ی بخش انجام‌نشده بعد از تایید به کیف پولت برمی‌گرده."
+        r = await sync_order(o)
+        if r and r[2]:
+            await notify_order_result(bot, o, r)
+    await c.message.edit_text(text)
 
 
 @router.message(F.text == BTN_ORDERS)
@@ -1213,7 +1605,8 @@ async def admin_panel(m: Message, state: FSMContext):
     unk = (await one("SELECT COUNT(*) AS n FROM orders WHERE status='Unknown'"))["n"]
     price = await get_setting("price_per_1000")
     maint = await is_maintenance()
-    rline = f"\n👍 قیمت هر ۱۰۰ ریکشن: {fmt(await get_setting('react_price_per_100'))}" if REACT_ENABLED else ""
+    rline = (f"\n👍 قیمت هر ۱۰۰ ریکشن: {fmt(await get_setting('react_price_per_100'))}"
+             f"\n🗳 قیمت هر ۱۰۰ رأی: {fmt(await get_setting('like_price_per_100'))}") if REACT_ENABLED else ""
     await m.answer(
         "🛠 <b>پنل ادمین</b>\n\n"
         f"📊 کاربران: {u['n']} | مجموع موجودی کیف‌پول‌ها: {fmt(u['b'])}\n"
@@ -1222,7 +1615,7 @@ async def admin_panel(m: Message, state: FSMContext):
         f"🛠 حالت تعمیر: {'روشن' if maint else 'خاموش'}\n\n"
         "<b>دستورات:</b>\n/user آیدی یا @یوزرنیم\n/pending رسیدهای در انتظار\n/add id مبلغ\n/sub id مبلغ\n"
         "/ban id\n/unban id\n/price مبلغ\n/card متن کارت\n/limits حداقل حداکثر\n"
-        "/support @آیدی\n/brand نام ربات\n/provider موجودی provider\n/unknown سفارش‌های نامشخص\n/resolve id شماره\n/refund id\n/rprice مبلغ (قیمت هر ۱۰۰ ریکشن)\n"
+        "/support @آیدی\n/brand نام ربات\n/provider موجودی provider\n/unknown سفارش‌های نامشخص\n/resolve id شماره\n/refund id\n/rprice مبلغ (قیمت هر ۱۰۰ ریکشن)\n/lprice مبلغ (قیمت هر ۱۰۰ رأی)\n"
         "/maintenance on|off\n/report [روز_قبل]\n/backup\n/broadcast متن",
         reply_markup=admin_kb(maint))
 
@@ -1466,6 +1859,15 @@ async def cmd_provider(m: Message):
 async def adm_provider(c: CallbackQuery):
     await c.answer()
     await c.message.answer(await provider_balance_text())
+
+
+@router.message(Command("lprice"), IS_ADMIN)
+async def cmd_lprice(m: Message, command: CommandObject):
+    v = to_int(command.args)
+    if not v:
+        return await m.answer("فرمت: /lprice 4000 (قیمت فروش هر ۱۰۰ رأی)")
+    await set_setting("like_price_per_100", v)
+    await m.answer(f"✅ قیمت هر ۱۰۰ رأی: {fmt(v)} تومان")
 
 
 @router.message(Command("rprice"), IS_ADMIN)
