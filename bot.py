@@ -9,7 +9,7 @@ import random
 import re
 import time
 import traceback
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import aiohttp
@@ -35,11 +35,14 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 PROVIDER_URL = os.getenv("PROVIDER_URL", "")
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 SERVICE_ID = os.getenv("SERVICE_ID", "")
-PROVIDER_METHOD = os.getenv("PROVIDER_METHOD", "GET").upper()
-PROVIDER_TYPE = os.getenv("PROVIDER_TYPE", "smm").lower()
+PROVIDER_METHOD = os.getenv("PROVIDER_METHOD", "GET").upper()  # GET یا POST (فقط برای نوع smm)
+PROVIDER_TYPE = os.getenv("PROVIDER_TYPE", "smm").lower()  # فقط برای سازگاری با تنظیمات قدیمی: smm یا actionseen
 
 
 def _build_providers():
+    """دو provider: as = اکشن‌سین (ارزون‌تر، امکانات بیشتر) و pt = پاورتل (فوق‌سریع، فرمت استاندارد SMM).
+    تنظیم‌های جدید: AS_KEY / PT_KEY (و اختیاری AS_URL, PT_URL, PT_SERVICE_ID, PT_METHOD).
+    اگه فقط تنظیم‌های قدیمی (PROVIDER_*) باشن، همون‌ها به provider مربوطه تعلق می‌گیرن."""
     legacy_as = PROVIDER_TYPE == "actionseen"
     return {
         "as": {"type": "actionseen",
@@ -56,22 +59,22 @@ def _build_providers():
 PROVIDERS = _build_providers()
 ENABLED_PROVS = [p for p in ("pt", "as") if PROVIDERS[p]["key"]]
 DEFAULT_PROV = "as" if PROVIDERS["as"]["key"] else "pt"
-LEGACY_PROV = "as" if PROVIDER_TYPE == "actionseen" else "pt"
+LEGACY_PROV = "as" if PROVIDER_TYPE == "actionseen" else "pt"  # سفارش‌های قدیمی (بدون ستون provider) مال این بودن
 PROV_NAMES = {"as": "اکشن‌سین (اقتصادی)", "pt": "پاورتل (فوق‌سریع)"}
-
+# سرویس‌های سین که مشتری انتخاب می‌کنه
 SERVICES = {
     "fast": {"name": "⚡ فوق‌سریع", "provider": "pt", "desc": "معمولاً زیر ۲ دقیقه می‌رسه", "max": 45000},
     "eco": {"name": "🟢 اقتصادی", "provider": "as", "desc": "حدود ۱۵ دقیقه طول می‌کشه؛ ارزون‌تره"},
 }
-COIN_TOMAN = float(os.getenv("COIN_TOMAN", "0.38"))
-FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "")
+COIN_TOMAN = float(os.getenv("COIN_TOMAN", "0.38"))  # ارزش هر سکه (فقط برای نمایش موجودی actionseen)
+FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "")  # مثلا @mychannel ، خالی = غیرفعال
 DATABASE_URL = os.environ["DATABASE_URL"]
 MIN_TOPUP = int(os.getenv("MIN_TOPUP", "10000"))
 TOPUP_TTL = int(os.getenv("TOPUP_TTL_MIN", "30")) * 60
-CREDIT_FULL = os.getenv("CREDIT_FULL", "0") == "1"
+CREDIT_FULL = os.getenv("CREDIT_FULL", "0") == "1"  # 1 = کل مبلغ واریزی (با عدد رندوم) شارژ شود
 RAND_MIN, RAND_MAX = 1, 999
 MAX_LINKS = 10
-LOW_PROVIDER_BALANCE = float(os.getenv("LOW_PROVIDER_BALANCE", "0"))
+LOW_PROVIDER_BALANCE = float(os.getenv("LOW_PROVIDER_BALANCE", "0"))  # 0 = غیرفعال
 
 DEFAULTS = {
     "price_per_1000": os.getenv("DEFAULT_PRICE", "1500"),
@@ -85,14 +88,15 @@ DEFAULTS = {
     "maintenance": "0",
 }
 
-REACT_ENABLED = bool(PROVIDERS["as"]["key"])
+REACT_ENABLED = bool(PROVIDERS["as"]["key"])  # ریکشن، رأی، چند پست آخر، ارسال تدریجی و لغو فقط با API اکشن‌سین
 REACT_MIN, REACT_MAX = 10, 10000
 LIKE_MIN, LIKE_MAX = 10, 10000
-EXTRAS = REACT_ENABLED
+EXTRAS = REACT_ENABLED  # قابلیت‌های اضافه‌ی API اکشن‌سین (ریکشن، رأی، چند پست آخر، ارسال تدریجی، لغو)
 COINS_PER_REACTION = 50
-IR_OFFSET = 12600
-
+IR_OFFSET = 12600  # UTC+3:30
+# هزینه‌ی خرید از provider (تومان) برای گزارش سود؛ برای اکشن‌سین از روی سکه حساب می‌شه
 COST_VIEW_PER_1000 = float(os.getenv("COST_VIEW_PER_1000", str(1000 * COIN_TOMAN) if PROVIDER_TYPE == "actionseen" else "0"))
+# هزینه‌ی خرید هر ۱۰۰۰ سین (تومان) از هر provider برای گزارش سود
 COST_PER_1000 = {"as": float(os.getenv("COST_ECO_PER_1000", str(1000 * COIN_TOMAN))),
                  "pt": float(os.getenv("COST_FAST_PER_1000", "850"))}
 COST_REACT_PER_100 = float(os.getenv("COST_REACT_PER_100", str(100 * COINS_PER_REACTION * COIN_TOMAN)))
@@ -107,8 +111,6 @@ def extract_links(text):
         if link not in out:
             out.append(link)
     return out[:MAX_LINKS]
-
-
 STATUS_FA = {
     "Unknown": "⏳ در حال بررسی", "Pending": "⏳ در صف", "Processing": "⚙️ در حال پردازش", "In progress": "⚙️ در حال انجام",
     "Completed": "✅ تکمیل", "Partial": "◐ ناقص (مابقی برگشت خورد)",
@@ -139,7 +141,7 @@ MENU_TEXTS = {BTN_ORDER, BTN_LAST, BTN_REACT, BTN_LIKE, BTN_CHARGE, BTN_ACC, BTN
 
 router = Router()
 IS_ADMIN = F.from_user.id.in_(ADMIN_IDS)
-db = None
+db = None  # در init_db ساخته می‌شه
 
 
 def clean_dsn(url):
@@ -154,6 +156,8 @@ class Result:
 
 
 class PG:
+    """لایه‌ی کوچیک روی asyncpg تا بقیه‌ی کد با ? و rowcount کار کنه."""
+
     def __init__(self, pool):
         self.pool = pool
 
@@ -178,8 +182,30 @@ class PG:
     async def insert(self, sql, args=()):
         return await self.pool.fetchval(self.q(sql) + " RETURNING id", *args)
 
-    async def commit(self):
+    async def commit(self):  # autocommit
         pass
+
+    @asynccontextmanager
+    async def tx(self):
+        """چند دستور SQL در یک تراکنش: یا همه اعمال می‌شن یا هیچ‌کدوم."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                yield Tx(conn)
+
+
+class Tx:
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def execute(self, sql, args=()):
+        status = await self.conn.execute(PG.q(sql), *args)
+        try:
+            return Result(int(status.split()[-1]))
+        except (ValueError, IndexError):
+            return Result(0)
+
+    async def one(self, sql, args=()):
+        return await self.conn.fetchrow(PG.q(sql), *args)
 
 
 SCHEMA = [
@@ -197,6 +223,7 @@ SCHEMA = [
 ]
 
 
+# ───────────────────────── دیتابیس ─────────────────────────
 async def init_db():
     global db
     pool = await asyncpg.create_pool(clean_dsn(DATABASE_URL), min_size=1, max_size=5,
@@ -225,29 +252,28 @@ async def set_setting(key, value):
                      (key, str(value)))
 
 
-# اصلاح‌شده: تراکنش واقعی و اتمیک دیتابیس
+async def _ledger(tx, uid, delta, reason):
+    await tx.execute("INSERT INTO ledger(user_id,amount,reason,ts) VALUES (?,?,?,?)", (uid, delta, reason, int(time.time())))
+
+
+async def _credit(tx, uid, delta, reason):
+    """تغییر موجودی + ثبت در دفتر تراکنش‌ها، داخل یک تراکنش بیرونی."""
+    await tx.execute("UPDATE users SET balance=balance+? WHERE id=?", (delta, uid))
+    await _ledger(tx, uid, delta, reason)
+
+
 async def balance_change(uid, delta, reason):
-    async with db.pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute("UPDATE users SET balance=balance+$1 WHERE id=$2", delta, uid)
-            await conn.execute("INSERT INTO ledger(user_id,amount,reason,ts) VALUES ($1,$2,$3,$4)",
-                               uid, delta, reason, int(time.time()))
+    async with db.tx() as tx:
+        await _credit(tx, uid, delta, reason)
 
 
-# اصلاح‌شده: کسر اعتبار همراه با ترنزکشن اتمیک
 async def try_spend(uid, amount, reason):
-    async with db.pool.acquire() as conn:
-        async with conn.transaction():
-            status = await conn.execute("UPDATE users SET balance=balance-$1 WHERE id=$2 AND balance>=$1", amount, uid)
-            try:
-                rowcount = int(status.split()[-1])
-            except (ValueError, IndexError):
-                rowcount = 0
-            if rowcount == 1:
-                await conn.execute("INSERT INTO ledger(user_id,amount,reason,ts) VALUES ($1,$2,$3,$4)",
-                                   uid, -amount, reason, int(time.time()))
-                return True
+    async with db.tx() as tx:
+        cur = await tx.execute("UPDATE users SET balance=balance-? WHERE id=? AND balance>=?", (amount, uid, amount))
+        if cur.rowcount != 1:
             return False
+        await _ledger(tx, uid, -amount, reason)
+        return True
 
 
 def to_int(s):
@@ -256,42 +282,51 @@ def to_int(s):
     return int(s) if s.isdigit() else None
 
 
-# اصلاح‌شده: هندلینگ خطا و دریافت ایمن JSON
+# ───────────────────────── provider ─────────────────────────
+class ProviderError(Exception):
+    pass
+
+
+async def _json(r):
+    """پاسخ provider رو می‌خونه؛ اگه JSON نبود (مثلاً صفحه‌ی HTML خطای ۵۰۲) خطای واضح می‌ده."""
+    text = await r.text()
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise ProviderError(f"پاسخ نامعتبر از provider (HTTP {r.status}): {text[:80]!r}")
+
+
 async def provider(**params):
+    """کلاینت provider. خروجی همیشه JSON ـه. پارامتر prov مشخص می‌کنه کدوم provider (as یا pt).
+    نوع actionseen: عمل‌ها به فرمت وبسرویس اکشن‌سین ترجمه می‌شن (لینک باید خام و بدون کدگذاری برود).
+    نوع smm: فرمت استاندارد (action=add/status/balance).
+    kind=view|reaction|like ، emoji و opts فقط برای اکشن‌سین‌ان."""
     prov = params.pop("prov", None) or DEFAULT_PROV
     cfg = PROVIDERS[prov]
     kind = params.pop("kind", "view") or "view"
     emoji = params.pop("emoji", None)
     opts = params.pop("opts", None) or {}
-
+    if cfg["type"] == "actionseen":
+        act = params["action"]
+        svc = kind if kind in ("view", "reaction", "like") else "view"
+        extra = "".join(f"&{k}={int(v)}" for k, v in opts.items())
+        if act == "add" and svc == "reaction":
+            q = f"action=reaction&link={params['link']}&quantity={params['quantity']}&text={quote(emoji or '👍')}{extra}"
+        elif act == "add":
+            q = f"action={svc}&link={params['link']}&quantity={params['quantity']}{extra}"
+        elif act in ("status", "cancel"):
+            q = f"action={svc if act == 'status' else 'cancel'}&order={params['order']}"
+        else:
+            q = f"action={act}"
+        url = URL(f"{cfg['url'].rstrip('/')}/?key={cfg['key']}&{q}", encoded=True)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+            async with s.get(url) as r:
+                return await _json(r)
+    data = {"key": cfg["key"], **params}
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
-        try:
-            if cfg["type"] == "actionseen":
-                act = params["action"]
-                svc = kind if kind in ("view", "reaction", "like") else "view"
-                extra = "".join(f"&{k}={int(v)}" for k, v in opts.items())
-                if act == "add" and svc == "reaction":
-                    q = f"action=reaction&link={params['link']}&quantity={params['quantity']}&text={quote(emoji or '👍')}{extra}"
-                elif act == "add":
-                    q = f"action={svc}&link={params['link']}&quantity={params['quantity']}{extra}"
-                elif act in ("status", "cancel"):
-                    q = f"action={svc if act == 'status' else 'cancel'}&order={params['order']}"
-                else:
-                    q = f"action={act}"
-                url = URL(f"{cfg['url'].rstrip('/')}/?key={cfg['key']}&{q}", encoded=True)
-                req = s.get(url)
-            else:
-                data = {"key": cfg["key"], **params}
-                req = s.post(cfg["url"], data=data) if cfg.get("method") == "POST" else s.get(cfg["url"], params=data)
-
-            async with req as r:
-                try:
-                    return await r.json(content_type=None)
-                except Exception:
-                    text = await r.text()
-                    return {"error": f"پاسخ نا معتبر از سرور SMM (کد وضعیت {r.status}): {text[:100]}"}
-        except Exception as e:
-            return {"error": f"خطا در ارتباط با سرویس‌دهنده: {str(e)}"}
+        req = s.post(cfg["url"], data=data) if cfg.get("method") == "POST" else s.get(cfg["url"], params=data)
+        async with req as r:
+            return await _json(r)
 
 
 async def notify_admins(bot, text):
@@ -301,9 +336,11 @@ async def notify_admins(bot, text):
 
 
 _last_err = {}
+_low_sent = {}  # آخرین زمان ارسال هشدار موجودی کم برای هر provider
 
 
 async def report_error(bot, where, exc):
+    """خطا رو برای ادمین می‌فرسته (هر خطای تکراری حداکثر هر ۵ دقیقه یک بار)."""
     key = f"{where}:{type(exc).__name__}:{str(exc)[:60]}"
     now = time.time()
     if now - _last_err.get(key, 0) < 300:
@@ -313,9 +350,38 @@ async def report_error(bot, where, exc):
     await notify_admins(bot, f"🚨 خطا در ربات ({where})\n<pre>{html.escape(tb)}</pre>")
 
 
-async def place_order(uid, link, qty, cost, kind="view", emoji=None, posts=1, opts=None, opt=None, prov=None):
+async def cancel_and_refund(oid, reason):
+    """سفارش «نامشخص» رو لغو می‌کنه و پولش رو برمی‌گردونه (اتمیک)."""
+    async with db.tx() as tx:
+        cur = await tx.execute("UPDATE orders SET status='Canceled', settled=1 WHERE id=? AND status='Unknown'", (oid,))
+        if cur.rowcount != 1:
+            return False
+        o = await tx.one("SELECT user_id, cost FROM orders WHERE id=?", (oid,))
+        await _credit(tx, o["user_id"], o["cost"], reason)
+    return True
+
+
+async def reserve_order(uid, link, qty, cost, kind, emoji, posts, opt, prov):
+    """کسر پول و ثبت ردیف سفارش با وضعیت «Unknown» در یک تراکنش؛ اگه موجودی کافی نباشه None.
+    اینجوری اگه ربات وسط کار ری‌استارت بشه، سفارش توی /unknown می‌مونه و پول بی‌اثر گم نمی‌شه."""
+    reason = {"reaction": "order-reaction", "like": "order-like"}.get(kind, "order")
+    async with db.tx() as tx:
+        cur = await tx.execute("UPDATE users SET balance=balance-? WHERE id=? AND balance>=?", (cost, uid, cost))
+        if cur.rowcount != 1:
+            return None
+        await _ledger(tx, uid, -cost, reason)
+        row = await tx.one(
+            "INSERT INTO orders(user_id,link,quantity,cost,provider_order,status,created,kind,emoji,posts,opt,provider) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
+            (uid, link, qty, cost, "", "Unknown", int(time.time()), kind, emoji, posts, opt, prov))
+        return row["id"]
+
+
+async def place_order(oid, link, qty, kind="view", emoji=None, opts=None, prov=None):
+    """سفارش رزروشده رو به provider می‌فرسته و ردیفش رو به‌روز می‌کنه.
+    نتیجه: ("ok", شماره‌ی provider) | ("failed", متن خطا؛ پول برگشته) | ("unknown", شماره‌ی سفارش؛ پول برنگشته، ادمین بررسی کنه)."""
     prov = prov or DEFAULT_PROV
-    res, err = None, ""
+    res = None
     try:
         for e_try in (emoji_variants(emoji) if kind == "reaction" and emoji else [emoji]):
             res = await provider(action="add", prov=prov, service=PROVIDERS[prov].get("service", ""), link=link, quantity=qty,
@@ -324,22 +390,22 @@ async def place_order(uid, link, qty, cost, kind="view", emoji=None, posts=1, op
             if not (kind == "reaction" and bad_emoji):
                 emoji = e_try
                 break
-    except aiohttp.ClientConnectorError as e:
+    except aiohttp.ClientConnectorError as e:  # اصلاً به provider وصل نشده → مطمئنیم ثبت نشده
+        await cancel_and_refund(oid, "refund-failed-order")
         return "failed", str(e)
-    except Exception as e:
-        err = str(e) or type(e).__name__
-    now = int(time.time())
-    ins = "INSERT INTO orders(user_id,link,quantity,cost,provider_order,status,created,kind,emoji,posts,opt,provider) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+    except Exception:
+        res = None  # جواب نامعتبر یا تایم‌اوت → معلوم نیست ثبت شده یا نه
     if isinstance(res, dict) and "order" in res:
-        await db.execute(ins, (uid, link, qty, cost, str(res["order"]), "Pending", now, kind, emoji, posts, opt, prov))
+        await db.execute("UPDATE orders SET provider_order=?, status='Pending', emoji=? WHERE id=?", (str(res["order"]), emoji, oid))
         return "ok", res["order"]
     if isinstance(res, dict) and res.get("error"):
+        await cancel_and_refund(oid, "refund-failed-order")
         return "failed", str(res["error"])
-    oid = await db.insert(ins, (uid, link, qty, cost, "", "Unknown", now, kind, emoji, posts, opt, prov))
     return "unknown", oid
 
 
 def calc_refund(o, res, st):
+    """مبلغ برگشتی (تومان). remains در اکشن‌سین سکه‌ست: هر سین ۱ سکه، هر ریکشن/رأی ۵۰ سکه."""
     total = max(1, o["quantity"] * (o.get("posts") or 1))
     try:
         remains = int(float(res.get("remains") or 0))
@@ -354,6 +420,7 @@ def calc_refund(o, res, st):
 
 
 async def sync_order(o):
+    """وضعیت سفارش رو از provider می‌گیره؛ در صورت لغو/ناقص، پول رو برمی‌گردونه."""
     if not o["provider_order"]:
         return None
     try:
@@ -373,19 +440,19 @@ async def sync_order(o):
     else:
         final = False
     if final:
-        cur = await db.execute("UPDATE orders SET status=?, settled=1 WHERE id=? AND settled=0", (st, o["id"]))
-        await db.commit()
-        if cur.rowcount != 1:
-            return None
-        if refund:
-            await balance_change(o["user_id"], refund, f"refund-order-{o['id']}")
+        async with db.tx() as tx:
+            cur = await tx.execute("UPDATE orders SET status=?, settled=1 WHERE id=? AND settled=0", (st, o["id"]))
+            if cur.rowcount != 1:
+                return None
+            if refund:
+                await _credit(tx, o["user_id"], refund, f"refund-order-{o['id']}")
     else:
         await db.execute("UPDATE orders SET status=? WHERE id=?", (st, o["id"]))
-        await db.commit()
     return st, refund, final
 
 
 async def notify_order_result(bot, o, r):
+    """بعد از نهایی شدن سفارش، به مشتری خبر می‌ده. اگه کامل شده باشه یه متن و بعدش جدا یه 😜 می‌فرسته."""
     st, refund, _final = r
     if st == "Completed":
         brand = html.escape(await get_setting("brand"))
@@ -405,7 +472,6 @@ async def notify_order_result(bot, o, r):
         await bot.send_message(o["user_id"], msg)
 
 
-# اصلاح‌شده: جابه‌جایی sleep به انتهای حلقه برای بررسی فوری هنگام شروع ربات
 async def poll_orders(bot):
     while True:
         try:
@@ -419,15 +485,16 @@ async def poll_orders(bot):
                         res = await provider(action="balance", prov=p)
                         bal = float(res.get("balance", 0))
                         toman = bal * COIN_TOMAN if p == "as" else bal
-                        if toman < LOW_PROVIDER_BALANCE:
+                        if toman < LOW_PROVIDER_BALANCE and time.time() - _low_sent.get(p, 0) > 6 * 3600:
+                            _low_sent[p] = time.time()
                             await notify_admins(bot, f"⚠️ موجودی {PROV_NAMES[p]} کمه: حدود {fmt(toman)} تومان")
         except Exception as e:
             logging.exception("poll_orders")
             await report_error(bot, "poll_orders", e)
-        
         await asyncio.sleep(600)
 
 
+# ───────────────────────── ابزارهای کمکی: تعمیر، تاریخ، گزارش، بکاپ ─────────────────────────
 async def get_opt(key, default=""):
     r = await one("SELECT value FROM settings WHERE key=?", (key,))
     return r["value"] if r else default
@@ -589,8 +656,8 @@ async def send_backup(bot, caption="💾 بکاپ دیتابیس"):
 
 
 async def daily_jobs(bot):
+    """گزارش روزانه (بعد از نیمه‌شب به وقت ایران) و بکاپ روزانه؛ با ری‌استارت دوبار ارسال نمی‌شن."""
     while True:
-        await asyncio.sleep(600)
         try:
             today = ir_day()
             raw = await get_opt("last_report_day", "")
@@ -607,8 +674,10 @@ async def daily_jobs(bot):
         except Exception as e:
             logging.exception("daily_jobs")
             await report_error(bot, "daily_jobs", e)
+        await asyncio.sleep(600)
 
 
+# ───────────────────────── Middleware (بن + عضویت اجباری) ─────────────────────────
 class Guard(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
@@ -618,6 +687,7 @@ class Guard(BaseMiddleware):
                          (user.id, user.username, int(time.time())))
         await db.execute("UPDATE users SET username=? WHERE id=?", (user.username, user.id))
         await db.commit()
+        # زدن هر دکمه‌ی منو، فرایند نیمه‌کاره (شارژ، سفارش، رسید...) رو ریست می‌کنه
         if isinstance(event, Message) and event.text in MENU_TEXTS and data.get("state") is not None:
             await data["state"].clear()
             data["raw_state"] = None
@@ -631,7 +701,7 @@ class Guard(BaseMiddleware):
                 m = await data["bot"].get_chat_member(FORCE_CHANNEL, user.id)
                 joined = m.status in ("member", "administrator", "creator")
             except Exception:
-                joined = True
+                joined = True  # اگه ربات نتونست چک کنه، کاربر رو بلاک نکن
             if not joined:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📢 عضویت در کانال", url=f"https://t.me/{FORCE_CHANNEL.lstrip('@')}")],
@@ -645,6 +715,7 @@ class Guard(BaseMiddleware):
         return await handler(event, data)
 
 
+# ───────────────────────── منو و حساب ─────────────────────────
 def fmt(n):
     return f"{int(n):,}"
 
@@ -755,10 +826,9 @@ async def support(m: Message, state: FSMContext):
                    "موقع پیام دادن، شناسه‌ی حسابت رو هم بفرست تا سریع‌تر پیگیری کنیم.", reply_markup=kb)
 
 
-# اصلاح‌شده: اضافه شدن وضعیت receipt برای FSM جهت مدیریت درست دریافت رسید
+# ───────────────────────── شارژ کیف پول ─────────────────────────
 class Charge(StatesGroup):
     amount = State()
-    receipt = State()
 
 
 class AdminEdit(StatesGroup):
@@ -814,12 +884,10 @@ async def get_open_topup(uid):
                      (uid, int(time.time())))
 
 
-async def show_open_topup(msg: Message, t, state: FSMContext = None):
+async def show_open_topup(msg: Message, t):
     if t["status"] == "claimed":
         return await msg.answer("⏳ رسید قبلی‌ت در انتظار تایید ادمینه.\nبعد از تایید می‌تونی دوباره شارژ کنی.")
     if t["status"] == "awaiting":
-        if state:
-            await state.set_state(Charge.receipt)
         return await msg.answer("🧾 منتظر رسید پرداختت هستم.\nعکس رسید (یا شماره‌ی پیگیری) رو همین‌جا بفرست.")
     return await msg.answer(await topup_text(t), reply_markup=topup_kb(t["id"]))
 
@@ -828,7 +896,7 @@ async def start_charge(msg: Message, state: FSMContext, uid: int):
     await state.clear()
     t = await get_open_topup(uid)
     if t:
-        return await show_open_topup(msg, t, state)
+        return await show_open_topup(msg, t)
     await state.set_state(Charge.amount)
     pres = [p for p in PRESETS if p >= MIN_TOPUP]
     rows = [[InlineKeyboardButton(text=f"{fmt(p)} تومان", callback_data=f"amt:{p}") for p in pres[i:i + 2]]
@@ -845,7 +913,7 @@ async def create_topup(msg: Message, state: FSMContext, uid: int, base: int):
     t = await get_open_topup(uid)
     if t:
         await state.clear()
-        return await show_open_topup(msg, t, state)
+        return await show_open_topup(msg, t)
     unique = await make_unique_amount(base)
     if unique is None:
         return await msg.answer("الان ظرفیت پر شده، چند دقیقه دیگه دوباره امتحان کن 🙏")
@@ -890,13 +958,12 @@ async def charge_amount(m: Message, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("cancel:"))
-async def topup_cancel(c: CallbackQuery, state: FSMContext):
-    await state.clear()
+async def topup_cancel(c: CallbackQuery):
     tid = int(c.data.split(":")[1])
-    cur = await db.execute("UPDATE topups SET status='canceled' WHERE id=? AND user_id=? AND status='pending'",
+    cur = await db.execute("UPDATE topups SET status='canceled' WHERE id=? AND user_id=? AND status IN ('pending','awaiting')",
                            (tid, c.from_user.id))
     await db.commit()
-    await c.message.edit_text("درخواست شارژ لغو شد.\nهر وقت خواستی دوباره از «💰 شارژ کیف پول» شروع کن."
+    await c.message.edit_text("درخواست شارژ لغو شد.\nاگه قبلاً واریز کردی، رسیدت رو برای پشتیبانی بفرست. هر وقت خواستی دوباره از «💰 شارژ کیف پول» شروع کن."
                               if cur.rowcount else "این درخواست دیگه قابل لغو نیست.")
     await c.answer()
 
@@ -916,16 +983,14 @@ def admin_topup_text(t, username):
             f"📥 اعتبار پیش‌فرض: {credit:,}")
 
 
-# اصلاح‌شده: تغییر State به Charge.receipt
 @router.callback_query(F.data.startswith("paid:"))
-async def topup_paid(c: CallbackQuery, state: FSMContext):
+async def topup_paid(c: CallbackQuery):
     tid = int(c.data.split(":")[1])
     cur = await db.execute("UPDATE topups SET status='awaiting', expires=? WHERE id=? AND user_id=? AND status='pending'",
                            (int(time.time()) + TOPUP_TTL, tid, c.from_user.id))
     await db.commit()
     if cur.rowcount != 1:
         return await c.answer("این درخواست دیگه فعال نیست.", show_alert=True)
-    await state.set_state(Charge.receipt)
     t = await one("SELECT * FROM topups WHERE id=?", (tid,))
     credit = t["unique_amount"] if CREDIT_FULL else t["base"]
     await c.message.edit_text(
@@ -937,15 +1002,14 @@ async def topup_paid(c: CallbackQuery, state: FSMContext):
 
 
 async def approve_topup(tid, amount=None):
-    cur = await db.execute("UPDATE topups SET status='approved' WHERE id=? AND status IN ('pending','awaiting','claimed')", (tid,))
-    await db.commit()
-    if cur.rowcount != 1:
-        return None
-    t = await one("SELECT * FROM topups WHERE id=?", (tid,))
-    credit = amount or (t["unique_amount"] if CREDIT_FULL else t["base"])
-    await db.execute("UPDATE topups SET credited=? WHERE id=?", (credit, tid))
-    await db.commit()
-    await balance_change(t["user_id"], credit, f"topup-{tid}")
+    async with db.tx() as tx:
+        cur = await tx.execute("UPDATE topups SET status='approved' WHERE id=? AND status IN ('pending','awaiting','claimed')", (tid,))
+        if cur.rowcount != 1:
+            return None
+        t = await tx.one("SELECT * FROM topups WHERE id=?", (tid,))
+        credit = amount or (t["unique_amount"] if CREDIT_FULL else t["base"])
+        await tx.execute("UPDATE topups SET credited=? WHERE id=?", (credit, tid))
+        await _credit(tx, t["user_id"], credit, f"topup-{tid}")
     return t, credit
 
 
@@ -998,6 +1062,7 @@ async def tc_edit_amount(m: Message, state: FSMContext, bot: Bot):
         await bot.send_message(r[0]["user_id"], f"✅ <b>پرداختت تایید شد!</b>\n💰 {amount:,} تومان به کیف پولت اضافه شد.\nحالا می‌تونی سفارش بدی 🛒")
 
 
+# ───────────────────────── ثبت سفارش ─────────────────────────
 class Order(StatesGroup):
     service = State()
     links = State()
@@ -1055,13 +1120,14 @@ async def order_service(c: CallbackQuery, state: FSMContext):
 
 
 async def check_link(bot, link):
+    """None یعنی سالمه؛ در غیر این صورت متن مشکل."""
     ch, pid = link.split("/")[3], link.split("/")[4]
     try:
         chat = await bot.get_chat(f"@{ch}")
     except TelegramBadRequest:
         return "کانال پیدا نشد یا عمومی نیست"
     except Exception:
-        return None
+        return None  # نتونستیم چک کنیم، بلاک نمی‌کنیم
     if chat.type != "channel":
         return "این لینک مربوط به یه کانال نیست"
     try:
@@ -1075,6 +1141,7 @@ async def check_link(bot, link):
 
 
 async def validate_links(m: Message, bot: Bot, kind: str):
+    """(لینک‌های معتبر، یادداشت) یا None (در این حالت خودش پیام خطا داده)."""
     cancel_kb = InlineKeyboardMarkup(inline_keyboard=[cancel_row()])
     links = extract_links(m.text)
     if not links:
@@ -1126,6 +1193,7 @@ async def order_links(m: Message, state: FSMContext, bot: Bot):
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]), disable_web_page_preview=True)
 
 
+# ───────────────────────── خلاصه‌ی سفارش، سرعت و ارسال تدریجی ─────────────────────────
 DRIP_CHOICES = [(0, "⚡ سریع (پیش‌فرض)"), (180, "🐢 تدریجی: طی حدود ۳ ساعت"), (360, "🐢 تدریجی: طی حدود ۶ ساعت"),
                 (720, "🐢 تدریجی: طی حدود ۱۲ ساعت"), (1440, "🐢 تدریجی: طی حدود ۲۴ ساعت")]
 SPEED_CHOICES = [(1, "⚡ سریع (پیش‌فرض)"), (5, "🐢 آرام: هر ۵ دقیقه یک بخش"), (15, "🐢 آرام: هر ۱۵ دقیقه یک بخش"),
@@ -1133,6 +1201,7 @@ SPEED_CHOICES = [(1, "⚡ سریع (پیش‌فرض)"), (5, "🐢 آرام: هر
 
 
 def drip_params(qty, minutes):
+    """«طی N دقیقه» رو به interval/vpi اکشن‌سین تبدیل می‌کنه (vpi حداقل ۱۰ و interval بین ۱ تا ۱۴۴۰ دقیقه)."""
     if not minutes:
         return {}
     interval = 15 if minutes >= 90 else 5
@@ -1304,8 +1373,16 @@ async def order_cancel(c: CallbackQuery, state: FSMContext):
     await c.answer()
 
 
+_locks = {}  # قفل هر کاربر؛ جلوی دوبار زدنِ سریعِ «تایید» رو می‌گیره
+
+
 @router.callback_query(F.data == "ord_ok")
 async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
+    async with _locks.setdefault(c.from_user.id, asyncio.Lock()):
+        await _order_confirm(c, state, bot)
+
+
+async def _order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
     d = await state.get_data()
     await state.clear()
     if "links" not in d or "total" not in d:
@@ -1319,15 +1396,20 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
     opts = build_opts(d, kind)
     prov = view_prov(d) if kind == "view" else "as"
     opt = f"{d['row']},{d['col']}" if kind == "like" else None
-    if not await try_spend(uid, d["total"], {"reaction": "order-reaction", "like": "order-like"}.get(kind, "order")):
+    bal = (await one("SELECT balance FROM users WHERE id=?", (uid,)))["balance"]
+    if bal < d["total"]:
         await c.message.edit_text("❌ موجودی کافی نیست.")
         return await c.answer()
     await c.message.edit_text("⏳ در حال ثبت سفارش...")
-    done, errors, unknown = 0, [], []
+    done, errors, unknown, nofunds = 0, [], [], 0
     for i, link in enumerate(d["links"]):
         if i:
             await asyncio.sleep(0.5)
-        st, info = await place_order(uid, link, d["qty"], d["link_cost"], kind, emoji, posts, opts, opt, prov)
+        oid = await reserve_order(uid, link, d["qty"], d["link_cost"], kind, emoji, posts, opt, prov)
+        if oid is None:
+            nofunds += 1
+            continue
+        st, info = await place_order(oid, link, d["qty"], kind, emoji, opts, prov)
         if st == "ok":
             done += 1
         elif st == "unknown":
@@ -1337,8 +1419,7 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
                                      f"اگه توی پنل provider ثبت شده: /resolve {info} شماره_سفارش_provider\n"
                                      f"اگه ثبت نشده: /refund {info}")
         else:
-            errors.append(info)
-            await balance_change(uid, d["link_cost"], "refund-failed-order")
+            errors.append(info)  # پول داخل place_order برگشته
     parts = []
     if done:
         parts.append(f"✅ <b>{done} سفارش با موفقیت ثبت شد!</b>\n"
@@ -1350,18 +1431,22 @@ async def order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
         parts.append(f"⚠️ {len(errors)} سفارش ثبت نشد و {fmt(len(errors) * d['link_cost'])} تومان به کیف پولت برگشت. "
                      "لطفاً کمی بعد دوباره تلاش کن یا به پشتیبانی پیام بده.")
         await notify_admins(bot, f"⚠️ خطا در ثبت سفارش (کاربر {uid}):\n{html.escape(errors[0][:300])}")
+    if nofunds:
+        parts.append(f"⚠️ {nofunds} سفارش به‌خاطر کافی نبودن موجودی ثبت نشد.")
     text = "\n\n".join(parts)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 سفارش‌های من", callback_data="my_orders")]])
     await c.message.edit_text(text, reply_markup=kb)
     await c.answer()
 
 
+# ───────────────────────── ریکشن ─────────────────────────
 class React(StatesGroup):
     links = State()
     emoji = State()
     qty = State()
 
 
+# همه‌ی ۷۳ ریکشن مجاز؛ پرکاربردها اول. ایموجی‌های ترکیبی با کد یونیکد نوشته شدن تا هیچ نویسه‌ی نامرئی‌ای گم نشه.
 EMOJIS = [
     "👍", "\u2764\ufe0f", "🔥", "🎉", "😁", "🤩", "👏", "😍", "🙏", "🥰", "💯", "🤣", "\u26a1\ufe0f", "🏆", "👌", "🤝",
     "👎", "🤔", "🤯", "😱", "🤬", "😢", "🤮", "💩", "\U0001F54A", "🤡", "🥱", "🥴", "🐳", "\u2764\ufe0f\u200d\U0001F525",
@@ -1372,6 +1457,7 @@ EMOJIS = [
 
 
 def emoji_variants(e):
+    """بعضی ایموجی‌ها با/بدون کاراکتر نامرئی FE0F نوشته می‌شن؛ اگه provider یکی رو رد کرد، حالت دیگه رو امتحان می‌کنیم."""
     out = [e]
     stripped = e.replace("\ufe0f", "")
     if stripped != e:
@@ -1475,6 +1561,7 @@ async def react_qty_preset(c: CallbackQuery, state: FSMContext):
     await process_react_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
 
 
+# ───────────────────────── سین برای چند پست آخر کانال ─────────────────────────
 CH_RE = re.compile(r"https?://t\.me/([A-Za-z][A-Za-z0-9_]{3,})")
 LASTX_PRESETS = [3, 5, 10, 20, 50, 100]
 
@@ -1576,6 +1663,7 @@ async def last_qty_cb(c: CallbackQuery, state: FSMContext):
     await process_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
 
 
+# ───────────────────────── رأی نظرسنجی / لایک ─────────────────────────
 class Like(StatesGroup):
     link = State()
     row = State()
@@ -1773,6 +1861,7 @@ async def orders_refresh(c: CallbackQuery):
     await show_orders(c.message, c.from_user.id, edit=True)
 
 
+# ───────────────────────── پنل ادمین ─────────────────────────
 def admin_kb(maint):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 مدیریت و شارژ کاربر", callback_data="adm_user")],
@@ -1813,6 +1902,7 @@ async def admin_panel(m: Message, state: FSMContext):
         reply_markup=admin_kb(maint))
 
 
+# ── مدیریت کاربر و شارژ دستی کیف پول
 async def find_user(q):
     q = (q or "").strip()
     n = to_int(q)
@@ -2149,121 +2239,4 @@ async def cmd_unknown(m: Message):
 @router.message(Command("resolve"), IS_ADMIN)
 async def cmd_resolve(m: Message, command: CommandObject, bot: Bot):
     parts = (command.args or "").split()
-    oid = to_int(parts[0]) if parts else None
-    if len(parts) < 2 or not oid:
-        return await m.answer("فرمت: /resolve شماره_سفارش شماره_سفارش_provider")
-    cur = await db.execute("UPDATE orders SET provider_order=?, status='Pending' WHERE id=? AND status='Unknown'", (parts[1], oid))
-    if cur.rowcount != 1:
-        return await m.answer("این سفارش پیدا نشد یا دیگه نامشخص نیست.")
-    o = await one("SELECT * FROM orders WHERE id=?", (oid,))
-    await m.answer("✅ ثبت شد و از حالا وضعیتش پیگیری می‌شه.")
-    with suppress(Exception):
-        await bot.send_message(o["user_id"], f"✅ سفارش #{oid} تایید شد و در حال انجامه.")
-
-
-@router.message(Command("refund"), IS_ADMIN)
-async def cmd_refund(m: Message, command: CommandObject, bot: Bot):
-    oid = to_int(command.args)
-    if not oid:
-        return await m.answer("فرمت: /refund شماره_سفارش")
-    cur = await db.execute("UPDATE orders SET status='Canceled', settled=1 WHERE id=? AND status='Unknown'", (oid,))
-    if cur.rowcount != 1:
-        return await m.answer("این سفارش پیدا نشد یا دیگه نامشخص نیست.")
-    o = await one("SELECT * FROM orders WHERE id=?", (oid,))
-    await balance_change(o["user_id"], o["cost"], f"refund-order-{oid}")
-    await m.answer(f"✅ {fmt(o['cost'])} تومان به کاربر برگشت.")
-    with suppress(Exception):
-        await bot.send_message(o["user_id"], f"ℹ️ سفارش #{oid} ثبت نشد و {fmt(o['cost'])} تومان به کیف پولت برگشت.")
-
-
-@router.message(Command("broadcast"), IS_ADMIN)
-async def cmd_broadcast(m: Message, command: CommandObject, bot: Bot):
-    if not command.args:
-        return await m.answer("فرمت: /broadcast متن پیام")
-    sent = 0
-    for u in await many("SELECT id FROM users WHERE banned=0"):
-        try:
-            await bot.send_message(u["id"], command.args)
-            sent += 1
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
-    await m.answer(f"✅ برای {sent} نفر ارسال شد.")
-
-
-# اصلاح‌شده: فیلتر دقیق فقط روی وضعیت Charge.receipt جهت ثبت صحیح رسید
-@router.message(Charge.receipt, F.photo | F.document | F.text)
-async def receipt_in(m: Message, bot: Bot, state: FSMContext):
-    if m.text and m.text.startswith("/"):
-        return
-    t = await one("SELECT * FROM topups WHERE user_id=? AND status='awaiting' ORDER BY id DESC LIMIT 1", (m.from_user.id,))
-    if not t:
-        await state.clear()
-        return
-    key = None
-    if m.photo:
-        key = m.photo[-1].file_unique_id
-    elif m.document:
-        key = m.document.file_unique_id
-    elif m.text and len(m.text.strip()) >= 6:
-        key = "t:" + m.text.strip().lower()
-    dup = await one("SELECT id, status FROM topups WHERE receipt_uid=? AND id<>? LIMIT 1", (key, t["id"])) if key else None
-    cur = await db.execute("UPDATE topups SET status='claimed', receipt_uid=? WHERE id=? AND status='awaiting'", (key, t["id"]))
-    if cur.rowcount != 1:
-        return
-    await state.clear()
-    warn = (f"🚨 <b>هشدار: این رسید قبلاً برای درخواست #{dup['id']} ({dup['status']}) ثبت شده!</b>\n\n" if dup else "")
-    for a in ADMIN_IDS:
-        with suppress(Exception):
-            cp = await bot.copy_message(chat_id=a, from_chat_id=m.chat.id, message_id=m.message_id)
-            await bot.send_message(a, warn + "🧾 <b>رسید بالا</b> مربوط به این پرداخته:\n\n" + admin_topup_text(t, m.from_user.username),
-                                   reply_markup=admin_topup_kb(t["id"]), reply_to_message_id=cp.message_id)
-    await m.answer("✅ <b>رسیدت ثبت و برای ادمین ارسال شد.</b>\nبعد از تایید، کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم 🙏")
-
-
-@router.errors()
-async def on_error(event: ErrorEvent, bot: Bot):
-    logging.error("handler error", exc_info=event.exception)
-    await report_error(bot, "handler", event.exception)
-    upd = event.update
-    with suppress(Exception):
-        if upd.message:
-            await upd.message.answer("⚠️ یه خطای موقت پیش اومد. لطفاً دوباره امتحان کن.")
-        elif upd.callback_query:
-            await upd.callback_query.answer("⚠️ خطای موقت؛ دوباره امتحان کن", show_alert=True)
-    return True
-
-
-# اصلاح‌شده: نادیده گرفتن خطای پورت جهت جلوگیری از کرش ربات روی سیستم لوکال
-async def health_server():
-    from aiohttp import web
-
-    async def ok(_):
-        return web.Response(text="ok")
-
-    app = web.Application()
-    app.router.add_get("/", ok)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    try:
-        await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000"))).start()
-    except Exception as e:
-        logging.warning(f"Health server couldn't start on port {os.getenv('PORT', '10000')}: {e}")
-
-
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await health_server()
-    await init_db()
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.message.outer_middleware(Guard())
-    dp.callback_query.outer_middleware(Guard())
-    dp.include_router(router)
-    asyncio.create_task(poll_orders(bot))
-    asyncio.create_task(daily_jobs(bot))
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    oid = to_int(par
