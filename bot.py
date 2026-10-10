@@ -35,14 +35,11 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 PROVIDER_URL = os.getenv("PROVIDER_URL", "")
 PROVIDER_KEY = os.getenv("PROVIDER_KEY", "")
 SERVICE_ID = os.getenv("SERVICE_ID", "")
-PROVIDER_METHOD = os.getenv("PROVIDER_METHOD", "GET").upper()  # GET یا POST (فقط برای نوع smm)
-PROVIDER_TYPE = os.getenv("PROVIDER_TYPE", "smm").lower()  # فقط برای سازگاری با تنظیمات قدیمی: smm یا actionseen
+PROVIDER_METHOD = os.getenv("PROVIDER_METHOD", "GET").upper()
+PROVIDER_TYPE = os.getenv("PROVIDER_TYPE", "smm").lower()
 
 
 def _build_providers():
-    """دو provider: as = اکشن‌سین (ارزون‌تر، امکانات بیشتر) و pt = پاورتل (فوق‌سریع، فرمت استاندارد SMM).
-    تنظیم‌های جدید: AS_KEY / PT_KEY (و اختیاری AS_URL, PT_URL, PT_SERVICE_ID, PT_METHOD).
-    اگه فقط تنظیم‌های قدیمی (PROVIDER_*) باشن، همون‌ها به provider مربوطه تعلق می‌گیرن."""
     legacy_as = PROVIDER_TYPE == "actionseen"
     return {
         "as": {"type": "actionseen",
@@ -59,22 +56,25 @@ def _build_providers():
 PROVIDERS = _build_providers()
 ENABLED_PROVS = [p for p in ("pt", "as") if PROVIDERS[p]["key"]]
 DEFAULT_PROV = "as" if PROVIDERS["as"]["key"] else "pt"
-LEGACY_PROV = "as" if PROVIDER_TYPE == "actionseen" else "pt"  # سفارش‌های قدیمی (بدون ستون provider) مال این بودن
+LEGACY_PROV = "as" if PROVIDER_TYPE == "actionseen" else "pt"
 PROV_NAMES = {"as": "اکشن‌سین (اقتصادی)", "pt": "پاورتل (فوق‌سریع)"}
-# سرویس‌های سین که مشتری انتخاب می‌کنه
+
 SERVICES = {
     "fast": {"name": "⚡ فوق‌سریع", "provider": "pt", "desc": "معمولاً زیر ۲ دقیقه می‌رسه", "max": 45000},
     "eco": {"name": "🟢 اقتصادی", "provider": "as", "desc": "حدود ۱۵ دقیقه طول می‌کشه؛ ارزون‌تره"},
 }
-COIN_TOMAN = float(os.getenv("COIN_TOMAN", "0.38"))  # ارزش هر سکه (فقط برای نمایش موجودی actionseen)
-FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "")  # مثلا @mychannel ، خالی = غیرفعال
+COIN_TOMAN = float(os.getenv("COIN_TOMAN", "0.38"))
+FORCE_CHANNEL = os.getenv("FORCE_CHANNEL", "")
 DATABASE_URL = os.environ["DATABASE_URL"]
 MIN_TOPUP = int(os.getenv("MIN_TOPUP", "10000"))
 TOPUP_TTL = int(os.getenv("TOPUP_TTL_MIN", "30")) * 60
-CREDIT_FULL = os.getenv("CREDIT_FULL", "0") == "1"  # 1 = کل مبلغ واریزی (با عدد رندوم) شارژ شود
+CREDIT_FULL = os.getenv("CREDIT_FULL", "0") == "1"
 RAND_MIN, RAND_MAX = 1, 999
 MAX_LINKS = 10
-LOW_PROVIDER_BALANCE = float(os.getenv("LOW_PROVIDER_BALANCE", "0"))  # 0 = غیرفعال
+
+# ایمن‌سازی خواندن متغیر اعشاری برای جلوگیری از کرش
+_raw_low_bal = (os.getenv("LOW_PROVIDER_BALANCE") or "0").strip()
+LOW_PROVIDER_BALANCE = float(_raw_low_bal) if _raw_low_bal else 0.0
 
 DEFAULTS = {
     "price_per_1000": os.getenv("DEFAULT_PRICE", "1500"),
@@ -88,15 +88,13 @@ DEFAULTS = {
     "maintenance": "0",
 }
 
-REACT_ENABLED = bool(PROVIDERS["as"]["key"])  # ریکشن، رأی، چند پست آخر، ارسال تدریجی و لغو فقط با API اکشن‌سین
+REACT_ENABLED = bool(PROVIDERS["as"]["key"])
 REACT_MIN, REACT_MAX = 10, 10000
 LIKE_MIN, LIKE_MAX = 10, 10000
-EXTRAS = REACT_ENABLED  # قابلیت‌های اضافه‌ی API اکشن‌سین (ریکشن، رأی، چند پست آخر، ارسال تدریجی، لغو)
+EXTRAS = REACT_ENABLED
 COINS_PER_REACTION = 50
-IR_OFFSET = 12600  # UTC+3:30
-# هزینه‌ی خرید از provider (تومان) برای گزارش سود؛ برای اکشن‌سین از روی سکه حساب می‌شه
+IR_OFFSET = 12600
 COST_VIEW_PER_1000 = float(os.getenv("COST_VIEW_PER_1000", str(1000 * COIN_TOMAN) if PROVIDER_TYPE == "actionseen" else "0"))
-# هزینه‌ی خرید هر ۱۰۰۰ سین (تومان) از هر provider برای گزارش سود
 COST_PER_1000 = {"as": float(os.getenv("COST_ECO_PER_1000", str(1000 * COIN_TOMAN))),
                  "pt": float(os.getenv("COST_FAST_PER_1000", "850"))}
 COST_REACT_PER_100 = float(os.getenv("COST_REACT_PER_100", str(100 * COINS_PER_REACTION * COIN_TOMAN)))
@@ -111,6 +109,8 @@ def extract_links(text):
         if link not in out:
             out.append(link)
     return out[:MAX_LINKS]
+
+
 STATUS_FA = {
     "Unknown": "⏳ در حال بررسی", "Pending": "⏳ در صف", "Processing": "⚙️ در حال پردازش", "In progress": "⚙️ در حال انجام",
     "Completed": "✅ تکمیل", "Partial": "◐ ناقص (مابقی برگشت خورد)",
@@ -126,13 +126,15 @@ BTN_ORDERS, BTN_SUPPORT, BTN_HELP = "📦 سفارش‌های من", "💬 پش�
 BTN_REACT = "👍 ثبت ریکشن"
 BTN_LAST, BTN_LIKE = "📚 سین چند پست آخر", "🗳 رأی نظرسنجی"
 BTN_AUTO = "⚡ سین خودکار"
-AUTO_MENU = os.getenv("AUTO_MENU", "0") == "1"  # نمایش دکمه‌ی سین خودکار توی منو (وقتی آماده‌ی عرضه‌ست روشنش کن)
+AUTO_MENU = os.getenv("AUTO_MENU", "0") == "1"
+
 _menu_rows = [[KeyboardButton(text=BTN_ORDER)]]
 if EXTRAS:
     _menu_rows = [[KeyboardButton(text=BTN_ORDER), KeyboardButton(text=BTN_LAST)],
                   [KeyboardButton(text=BTN_REACT), KeyboardButton(text=BTN_LIKE)]]
 if AUTO_MENU:
     _menu_rows.append([KeyboardButton(text=BTN_AUTO)])
+
 MENU = ReplyKeyboardMarkup(
     keyboard=_menu_rows + [[KeyboardButton(text=BTN_CHARGE), KeyboardButton(text=BTN_ACC)],
                            [KeyboardButton(text=BTN_ORDERS), KeyboardButton(text=BTN_SUPPORT)],
@@ -145,7 +147,7 @@ MENU_TEXTS = {BTN_AUTO, BTN_ORDER, BTN_LAST, BTN_REACT, BTN_LIKE, BTN_CHARGE, BT
 
 router = Router()
 IS_ADMIN = F.from_user.id.in_(ADMIN_IDS)
-db = None  # در init_db ساخته می‌شه
+db = None
 
 
 def clean_dsn(url):
@@ -160,8 +162,6 @@ class Result:
 
 
 class PG:
-    """لایه‌ی کوچیک روی asyncpg تا بقیه‌ی کد با ? و rowcount کار کنه."""
-
     def __init__(self, pool):
         self.pool = pool
 
@@ -186,12 +186,11 @@ class PG:
     async def insert(self, sql, args=()):
         return await self.pool.fetchval(self.q(sql) + " RETURNING id", *args)
 
-    async def commit(self):  # autocommit
+    async def commit(self):
         pass
 
     @asynccontextmanager
     async def tx(self):
-        """چند دستور SQL در یک تراکنش: یا همه اعمال می‌شن یا هیچ‌کدوم."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 yield Tx(conn)
@@ -230,7 +229,6 @@ SCHEMA = [
 ]
 
 
-# ───────────────────────── دیتابیس ─────────────────────────
 async def init_db():
     global db
     pool = await asyncpg.create_pool(clean_dsn(DATABASE_URL), min_size=1, max_size=5,
@@ -264,7 +262,6 @@ async def _ledger(tx, uid, delta, reason):
 
 
 async def _credit(tx, uid, delta, reason):
-    """تغییر موجودی + ثبت در دفتر تراکنش‌ها، داخل یک تراکنش بیرونی."""
     await tx.execute("UPDATE users SET balance=balance+? WHERE id=?", (delta, uid))
     await _ledger(tx, uid, delta, reason)
 
@@ -284,18 +281,16 @@ async def try_spend(uid, amount, reason):
 
 
 def to_int(s):
-    s = (s or "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+    s = (s or "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١getDeclared٢٣٤٥٦٧٨٩", "01234567890123456789"))
     s = s.replace(",", "").replace("،", "").strip()
     return int(s) if s.isdigit() else None
 
 
-# ───────────────────────── provider ─────────────────────────
 class ProviderError(Exception):
     pass
 
 
 async def _json(r):
-    """پاسخ provider رو می‌خونه؛ اگه JSON نبود (مثلاً صفحه‌ی HTML خطای ۵۰۲) خطای واضح می‌ده."""
     text = await r.text()
     try:
         return json.loads(text)
@@ -304,10 +299,6 @@ async def _json(r):
 
 
 async def provider(**params):
-    """کلاینت provider. خروجی همیشه JSON ـه. پارامتر prov مشخص می‌کنه کدوم provider (as یا pt).
-    نوع actionseen: عمل‌ها به فرمت وبسرویس اکشن‌سین ترجمه می‌شن (لینک باید خام و بدون کدگذاری برود).
-    نوع smm: فرمت استاندارد (action=add/status/balance).
-    kind=view|reaction|like ، emoji و opts فقط برای اکشن‌سین‌ان."""
     prov = params.pop("prov", None) or DEFAULT_PROV
     cfg = PROVIDERS[prov]
     kind = params.pop("kind", "view") or "view"
@@ -343,11 +334,10 @@ async def notify_admins(bot, text):
 
 
 _last_err = {}
-_low_sent = {}  # آخرین زمان ارسال هشدار موجودی کم برای هر provider
+_low_sent = {}
 
 
 async def report_error(bot, where, exc):
-    """خطا رو برای ادمین می‌فرسته (هر خطای تکراری حداکثر هر ۵ دقیقه یک بار)."""
     key = f"{where}:{type(exc).__name__}:{str(exc)[:60]}"
     now = time.time()
     if now - _last_err.get(key, 0) < 300:
@@ -358,7 +348,6 @@ async def report_error(bot, where, exc):
 
 
 async def cancel_and_refund(oid, reason):
-    """سفارش «نامشخص» رو لغو می‌کنه و پولش رو برمی‌گردونه (اتمیک)."""
     async with db.tx() as tx:
         cur = await tx.execute("UPDATE orders SET status='Canceled', settled=1 WHERE id=? AND status='Unknown'", (oid,))
         if cur.rowcount != 1:
@@ -369,8 +358,6 @@ async def cancel_and_refund(oid, reason):
 
 
 async def reserve_order(uid, link, qty, cost, kind, emoji, posts, opt, prov):
-    """کسر پول و ثبت ردیف سفارش با وضعیت «Unknown» در یک تراکنش؛ اگه موجودی کافی نباشه None.
-    اینجوری اگه ربات وسط کار ری‌استارت بشه، سفارش توی /unknown می‌مونه و پول بی‌اثر گم نمی‌شه."""
     reason = {"reaction": "order-reaction", "like": "order-like"}.get(kind, "order")
     async with db.tx() as tx:
         cur = await tx.execute("UPDATE users SET balance=balance-? WHERE id=? AND balance>=?", (cost, uid, cost))
@@ -385,8 +372,6 @@ async def reserve_order(uid, link, qty, cost, kind, emoji, posts, opt, prov):
 
 
 async def place_order(oid, link, qty, kind="view", emoji=None, opts=None, prov=None):
-    """سفارش رزروشده رو به provider می‌فرسته و ردیفش رو به‌روز می‌کنه.
-    نتیجه: ("ok", شماره‌ی provider) | ("failed", متن خطا؛ پول برگشته) | ("unknown", شماره‌ی سفارش؛ پول برنگشته، ادمین بررسی کنه)."""
     prov = prov or DEFAULT_PROV
     res = None
     try:
@@ -397,11 +382,11 @@ async def place_order(oid, link, qty, kind="view", emoji=None, opts=None, prov=N
             if not (kind == "reaction" and bad_emoji):
                 emoji = e_try
                 break
-    except aiohttp.ClientConnectorError as e:  # اصلاً به provider وصل نشده → مطمئنیم ثبت نشده
+    except aiohttp.ClientConnectorError as e:
         await cancel_and_refund(oid, "refund-failed-order")
         return "failed", str(e)
     except Exception:
-        res = None  # جواب نامعتبر یا تایم‌اوت → معلوم نیست ثبت شده یا نه
+        res = None
     if isinstance(res, dict) and "order" in res:
         await db.execute("UPDATE orders SET provider_order=?, status='Pending', emoji=? WHERE id=?", (str(res["order"]), emoji, oid))
         return "ok", res["order"]
@@ -412,7 +397,6 @@ async def place_order(oid, link, qty, kind="view", emoji=None, opts=None, prov=N
 
 
 def calc_refund(o, res, st):
-    """مبلغ برگشتی (تومان). remains در اکشن‌سین سکه‌ست: هر سین ۱ سکه، هر ریکشن/رأی ۵۰ سکه."""
     total = max(1, o["quantity"] * (o.get("posts") or 1))
     try:
         remains = int(float(res.get("remains") or 0))
@@ -427,7 +411,6 @@ def calc_refund(o, res, st):
 
 
 async def sync_order(o):
-    """وضعیت سفارش رو از provider می‌گیره؛ در صورت لغو/ناقص، پول رو برمی‌گردونه."""
     if not o["provider_order"]:
         return None
     try:
@@ -459,7 +442,6 @@ async def sync_order(o):
 
 
 async def notify_order_result(bot, o, r):
-    """بعد از نهایی شدن سفارش، به مشتری خبر می‌ده. اگه کامل شده باشه یه متن و بعدش جدا یه 😜 می‌فرسته."""
     st, refund, _final = r
     if st == "Completed":
         brand = html.escape(await get_setting("brand"))
@@ -501,7 +483,6 @@ async def poll_orders(bot):
         await asyncio.sleep(600)
 
 
-# ───────────────────────── ابزارهای کمکی: تعمیر، تاریخ، گزارش، بکاپ ─────────────────────────
 async def get_opt(key, default=""):
     r = await one("SELECT value FROM settings WHERE key=?", (key,))
     return r["value"] if r else default
@@ -664,7 +645,6 @@ async def send_backup(bot, caption="💾 بکاپ دیتابیس"):
 
 
 async def daily_jobs(bot):
-    """گزارش روزانه (بعد از نیمه‌شب به وقت ایران) و بکاپ روزانه؛ با ری‌استارت دوبار ارسال نمی‌شن."""
     while True:
         try:
             today = ir_day()
@@ -685,7 +665,6 @@ async def daily_jobs(bot):
         await asyncio.sleep(600)
 
 
-# ───────────────────────── Middleware (بن + عضویت اجباری) ─────────────────────────
 class Guard(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = data.get("event_from_user")
@@ -695,7 +674,6 @@ class Guard(BaseMiddleware):
                          (user.id, user.username, int(time.time())))
         await db.execute("UPDATE users SET username=? WHERE id=?", (user.username, user.id))
         await db.commit()
-        # زدن هر دکمه‌ی منو، فرایند نیمه‌کاره (شارژ، سفارش، رسید...) رو ریست می‌کنه
         if isinstance(event, Message) and event.text in MENU_TEXTS and data.get("state") is not None:
             await data["state"].clear()
             data["raw_state"] = None
@@ -709,7 +687,7 @@ class Guard(BaseMiddleware):
                 m = await data["bot"].get_chat_member(FORCE_CHANNEL, user.id)
                 joined = m.status in ("member", "administrator", "creator")
             except Exception:
-                joined = True  # اگه ربات نتونست چک کنه، کاربر رو بلاک نکن
+                joined = True
             if not joined:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📢 عضویت در کانال", url=f"https://t.me/{FORCE_CHANNEL.lstrip('@')}")],
@@ -723,7 +701,6 @@ class Guard(BaseMiddleware):
         return await handler(event, data)
 
 
-# ───────────────────────── منو و حساب ─────────────────────────
 def fmt(n):
     return f"{int(n):,}"
 
@@ -835,7 +812,6 @@ async def support(m: Message, state: FSMContext):
                    "موقع پیام دادن، شناسه‌ی حسابت رو هم بفرست تا سریع‌تر پیگیری کنیم.", reply_markup=kb)
 
 
-# ───────────────────────── شارژ کیف پول ─────────────────────────
 class Charge(StatesGroup):
     amount = State()
 
@@ -1071,7 +1047,6 @@ async def tc_edit_amount(m: Message, state: FSMContext, bot: Bot):
         await bot.send_message(r[0]["user_id"], f"✅ <b>پرداختت تایید شد!</b>\n💰 {amount:,} تومان به کیف پولت اضافه شد.\nحالا می‌تونی سفارش بدی 🛒")
 
 
-# ───────────────────────── ثبت سفارش ─────────────────────────
 class Order(StatesGroup):
     service = State()
     links = State()
@@ -1129,14 +1104,13 @@ async def order_service(c: CallbackQuery, state: FSMContext):
 
 
 async def check_link(bot, link):
-    """None یعنی سالمه؛ در غیر این صورت متن مشکل."""
     ch, pid = link.split("/")[3], link.split("/")[4]
     try:
         chat = await bot.get_chat(f"@{ch}")
     except TelegramBadRequest:
         return "کانال پیدا نشد یا عمومی نیست"
     except Exception:
-        return None  # نتونستیم چک کنیم، بلاک نمی‌کنیم
+        return None
     if chat.type != "channel":
         return "این لینک مربوط به یه کانال نیست"
     try:
@@ -1150,7 +1124,6 @@ async def check_link(bot, link):
 
 
 async def validate_links(m: Message, bot: Bot, kind: str):
-    """(لینک‌های معتبر، یادداشت) یا None (در این حالت خودش پیام خطا داده)."""
     cancel_kb = InlineKeyboardMarkup(inline_keyboard=[cancel_row()])
     links = extract_links(m.text)
     if not links:
@@ -1202,7 +1175,6 @@ async def order_links(m: Message, state: FSMContext, bot: Bot):
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]), disable_web_page_preview=True)
 
 
-# ───────────────────────── خلاصه‌ی سفارش، سرعت و ارسال تدریجی ─────────────────────────
 DRIP_CHOICES = [(0, "⚡ سریع (پیش‌فرض)"), (180, "🐢 تدریجی: طی حدود ۳ ساعت"), (360, "🐢 تدریجی: طی حدود ۶ ساعت"),
                 (720, "🐢 تدریجی: طی حدود ۱۲ ساعت"), (1440, "🐢 تدریجی: طی حدود ۲۴ ساعت")]
 SPEED_CHOICES = [(1, "⚡ سریع (پیش‌فرض)"), (5, "🐢 آرام: هر ۵ دقیقه یک بخش"), (15, "🐢 آرام: هر ۱۵ دقیقه یک بخش"),
@@ -1210,7 +1182,6 @@ SPEED_CHOICES = [(1, "⚡ سریع (پیش‌فرض)"), (5, "🐢 آرام: هر
 
 
 def drip_params(qty, minutes):
-    """«طی N دقیقه» رو به interval/vpi اکشن‌سین تبدیل می‌کنه (vpi حداقل ۱۰ و interval بین ۱ تا ۱۴۴۰ دقیقه)."""
     if not minutes:
         return {}
     interval = 15 if minutes >= 90 else 5
@@ -1289,7 +1260,7 @@ async def show_summary(msg: Message, state: FSMContext, uid: int, edit=False):
     rows = [[InlineKeyboardButton(text="✅ تایید و ثبت سفارش", callback_data="ord_ok"),
              InlineKeyboardButton(text="❌ انصراف", callback_data="ord_no")]]
     if can_speed:
-        rows.append([InlineKeyboardButton(text="⏱ تغییر سرعت ارسال (اختیاری)", callback_data="spd_menu")])
+        rows.append([InlineKeyboardButton(text="⏱ تغییر سرعت ارسال (اختیاری", callback_data="spd_menu")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     if edit:
         with suppress(Exception):
@@ -1382,7 +1353,7 @@ async def order_cancel(c: CallbackQuery, state: FSMContext):
     await c.answer()
 
 
-_locks = {}  # قفل هر کاربر؛ جلوی دوبار زدنِ سریعِ «تایید» رو می‌گیره
+_locks = {}
 
 
 @router.callback_query(F.data == "ord_ok")
@@ -1428,7 +1399,7 @@ async def _order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
                                      f"اگه توی پنل provider ثبت شده: /resolve {info} شماره_سفارش_provider\n"
                                      f"اگه ثبت نشده: /refund {info}")
         else:
-            errors.append(info)  # پول داخل place_order برگشته
+            errors.append(info)
     parts = []
     if done:
         parts.append(f"✅ <b>{done} سفارش با موفقیت ثبت شد!</b>\n"
@@ -1448,14 +1419,12 @@ async def _order_confirm(c: CallbackQuery, state: FSMContext, bot: Bot):
     await c.answer()
 
 
-# ───────────────────────── ریکشن ─────────────────────────
 class React(StatesGroup):
     links = State()
     emoji = State()
     qty = State()
 
 
-# همه‌ی ۷۳ ریکشن مجاز؛ پرکاربردها اول. ایموجی‌های ترکیبی با کد یونیکد نوشته شدن تا هیچ نویسه‌ی نامرئی‌ای گم نشه.
 EMOJIS = [
     "👍", "\u2764\ufe0f", "🔥", "🎉", "😁", "🤩", "👏", "😍", "🙏", "🥰", "💯", "🤣", "\u26a1\ufe0f", "🏆", "👌", "🤝",
     "👎", "🤔", "🤯", "😱", "🤬", "😢", "🤮", "💩", "\U0001F54A", "🤡", "🥱", "🥴", "🐳", "\u2764\ufe0f\u200d\U0001F525",
@@ -1466,7 +1435,6 @@ EMOJIS = [
 
 
 def emoji_variants(e):
-    """بعضی ایموجی‌ها با/بدون کاراکتر نامرئی FE0F نوشته می‌شن؛ اگه provider یکی رو رد کرد، حالت دیگه رو امتحان می‌کنیم."""
     out = [e]
     stripped = e.replace("\ufe0f", "")
     if stripped != e:
@@ -1570,7 +1538,6 @@ async def react_qty_preset(c: CallbackQuery, state: FSMContext):
     await process_react_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
 
 
-# ───────────────────────── سین برای چند پست آخر کانال ─────────────────────────
 CH_RE = re.compile(r"https?://t\.me/([A-Za-z][A-Za-z0-9_]{3,})")
 LASTX_PRESETS = [3, 5, 10, 20, 50, 100]
 
@@ -1672,7 +1639,6 @@ async def last_qty_cb(c: CallbackQuery, state: FSMContext):
     await process_qty(c.message, state, c.from_user.id, int(c.data.split(":")[1]))
 
 
-# ───────────────────────── رأی نظرسنجی / لایک ─────────────────────────
 class Like(StatesGroup):
     link = State()
     row = State()
@@ -1870,7 +1836,6 @@ async def orders_refresh(c: CallbackQuery):
     await show_orders(c.message, c.from_user.id, edit=True)
 
 
-# ───────────────────────── پنل ادمین ─────────────────────────
 def admin_kb(maint):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 مدیریت و شارژ کاربر", callback_data="adm_user")],
@@ -1900,7 +1865,8 @@ async def admin_panel(m: Message, state: FSMContext):
     nauto = (await one("SELECT COUNT(*) AS n FROM auto_channels WHERE enabled=1"))["n"]
     rline = (f"\n👍 قیمت هر ۱۰۰ ریکشن: {fmt(await get_setting('react_price_per_100'))}"
              f"\n🗳 قیمت هر ۱۰۰ رأی: {fmt(await get_setting('like_price_per_100'))}") if REACT_ENABLED else ""
-    await m.answer(
+    
+    admin_text = (
         "🛠 <b>پنل ادمین</b>\n\n"
         f"📊 کاربران: {u['n']} | مجموع موجودی کیف‌پول‌ها: {fmt(u['b'])}\n"
         f"🛒 سفارش‌ها: {o['n']} | فروش: {fmt(o['s'])}\n"
@@ -1909,11 +1875,11 @@ async def admin_panel(m: Message, state: FSMContext):
         "<b>دستورات:</b>\n/user آیدی یا @یوزرنیم\n/pending رسیدهای در انتظار\n/add id مبلغ\n/sub id مبلغ\n"
         "/ban id\n/unban id\n/price مبلغ یا /price fast|eco مبلغ\n/service fast|eco on|off\n/auto off|beta|on\n/autobeta آیدی‌ها\n/autocap تعداد\n/autolist\n/autooff id\n/card متن کارت\n/limits حداقل حداکثر\n"
         "/support @آیدی\n/brand نام ربات\n/provider موجودی provider\n/unknown سفارش‌های نامشخص\n/resolve id شماره\n/refund id\n/rprice مبلغ (قیمت هر ۱۰۰ ریکشن)\n/lprice مبلغ (قیمت هر ۱۰۰ رأی)\n"
-        "/maintenance on|off\n/report [روز_قبل]\n/backup\n/broadcast متن",
-        reply_markup=admin_kb(maint))
+        "/maintenance on|off\n/report [روز_قبل]\n/backup\n/broadcast متن"
+    )
+    await m.answer(admin_text, reply_markup=admin_kb(maint))
 
 
-# ── مدیریت کاربر و شارژ دستی کیف پول
 async def find_user(q):
     q = (q or "").strip()
     n = to_int(q)
@@ -2212,4 +2178,534 @@ async def adm_maint(c: CallbackQuery):
 
 
 @router.message(Command("report"), IS_ADMIN)
-async def cmd_report(m: Message,
+async def cmd_report(m: Message, command: CommandObject):
+    back = to_int(command.args) or 0
+    start, end = day_range(ir_day() - back)
+    await m.answer(await build_report(start, end, "امروز" if back == 0 else f"{back} روز قبل"))
+
+
+@router.callback_query(F.data == "adm_report", IS_ADMIN)
+async def adm_report(c: CallbackQuery):
+    await c.answer()
+    start, end = day_range(ir_day())
+    await c.message.answer(await build_report(start, end, "امروز"))
+
+
+@router.message(Command("backup"), IS_ADMIN)
+async def cmd_backup(m: Message, bot: Bot):
+    await send_backup(bot)
+    await m.answer("✅ بکاپ ارسال شد.")
+
+
+@router.callback_query(F.data == "adm_backup", IS_ADMIN)
+async def adm_backup(c: CallbackQuery, bot: Bot):
+    await c.answer("در حال ساخت بکاپ...")
+    await send_backup(bot)
+
+
+@router.message(Command("unknown"), IS_ADMIN)
+async def cmd_unknown(m: Message):
+    rows = await many("SELECT * FROM orders WHERE status='Unknown' ORDER BY id")
+    if not rows:
+        return await m.answer("سفارش نامشخصی نیست ✅")
+    for o in rows:
+        await m.answer(f"#{o['id']} • کاربر <code>{o['user_id']}</code> • {order_label(o)}\n{o['link']}\n"
+                       f"/resolve {o['id']} شماره_provider\n/refund {o['id']}", disable_web_page_preview=True)
+
+
+@router.message(Command("resolve"), IS_ADMIN)
+async def cmd_resolve(m: Message, command: CommandObject, bot: Bot):
+    parts = (command.args or "").split()
+    oid = to_int(parts[0]) if parts else None
+    if len(parts) < 2 or not oid:
+        return await m.answer("فرمت: /resolve شماره_سفارش شماره_سفارش_provider")
+    cur = await db.execute("UPDATE orders SET provider_order=?, status='Pending' WHERE id=? AND status='Unknown'", (parts[1], oid))
+    if cur.rowcount != 1:
+        return await m.answer("این سفارش پیدا نشد یا دیگه نامشخص نیست.")
+    o = await one("SELECT * FROM orders WHERE id=?", (oid,))
+    await m.answer("✅ ثبت شد و از حالا وضعیتش پیگیری می‌شه.")
+    with suppress(Exception):
+        await bot.send_message(o["user_id"], f"✅ سفارش #{oid} تایید شد و در حال انجامه.")
+
+
+@router.message(Command("refund"), IS_ADMIN)
+async def cmd_refund(m: Message, command: CommandObject, bot: Bot):
+    oid = to_int(command.args)
+    if not oid:
+        return await m.answer("فرمت: /refund شماره_سفارش")
+    async with db.tx() as tx:
+        cur = await tx.execute("UPDATE orders SET status='Canceled', settled=1 WHERE id=? AND status='Unknown'", (oid,))
+        o = None
+        if cur.rowcount == 1:
+            o = await tx.one("SELECT * FROM orders WHERE id=?", (oid,))
+            await _credit(tx, o["user_id"], o["cost"], f"refund-order-{oid}")
+    if not o:
+        return await m.answer("این سفارش پیدا نشد یا دیگه نامشخص نیست.")
+    await m.answer(f"✅ {fmt(o['cost'])} تومان به کاربر برگشت.")
+    with suppress(Exception):
+        await bot.send_message(o["user_id"], f"ℹ️ سفارش #{oid} ثبت نشد و {fmt(o['cost'])} تومان به کیف پولت برگشت.")
+
+
+@router.message(Command("broadcast"), IS_ADMIN)
+async def cmd_broadcast(m: Message, command: CommandObject, bot: Bot):
+    if not command.args:
+        return await m.answer("فرمت: /broadcast متن پیام")
+    sent = 0
+    for u in await many("SELECT id FROM users WHERE banned=0"):
+        try:
+            await bot.send_message(u["id"], command.args)
+            sent += 1
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+    await m.answer(f"✅ برای {sent} نفر ارسال شد.")
+
+
+class Auto(StatesGroup):
+    channel = State()
+    service = State()
+    qty = State()
+
+
+_chan_locks = {}
+PAUSE_TEXT = {"balance": "موجودی کافی نبود", "removed": "ربات از ادمینی کانال برداشته شد",
+              "private": "کانال دیگه عمومی نیست", "admin": "توسط مدیریت متوقف شد"}
+
+
+async def auto_allowed(uid):
+    mode = await get_opt("auto_mode", "off")
+    if mode == "on":
+        return True
+    return mode == "beta" and (uid in ADMIN_IDS or str(uid) in (await get_opt("auto_beta", "")).replace(" ", "").split(","))
+
+
+async def notice_once(key, ttl):
+    if time.time() - int(await get_opt(key, "0") or 0) < ttl:
+        return False
+    await set_setting(key, int(time.time()))
+    return True
+
+
+async def auto_cost(qty, key):
+    return math.ceil(qty * await svc_price(key) / 1000)
+
+
+async def auto_hub(msg: Message, uid: int):
+    rows = await many("SELECT * FROM auto_channels WHERE user_id=? ORDER BY id", (uid,))
+    text = ("⚡ <b>سین خودکار</b>\n\n"
+            "هر پست جدیدی که توی کانالت بذاری، <b>خودکار</b> سین می‌خوره؛ لازم نیست هر بار لینک بفرستی.\n\n"
+            "📌 فقط پست‌های <b>جدید</b> حساب می‌شن، نه پست‌های قبلی.\n"
+            "💰 هزینه‌ی هر پست از کیف پولت کم می‌شه. اگه موجودی تموم بشه، سین خودکار متوقف می‌شه و بهت خبر می‌دم.\n")
+    kb = []
+    if rows:
+        text += "\n<b>کانال‌های تو:</b>\n"
+        for r in rows:
+            state = "🟢 فعال" if r["enabled"] else f"⏸ متوقف ({PAUSE_TEXT.get(r['paused_reason'], 'خاموش')})"
+            text += f"• @{html.escape(r['username'])} — {fmt(r['qty'])} سین برای هر پست ({SERVICES.get(r['service'], {}).get('name', '')}) — {state}\n"
+            kb.append([InlineKeyboardButton(text=("⏸ توقف" if r["enabled"] else "▶️ روشن") + f" @{r['username']}", callback_data=f"auto_t:{r['id']}"),
+                       InlineKeyboardButton(text="🗑 حذف", callback_data=f"auto_d:{r['id']}")])
+    kb.append([InlineKeyboardButton(text="➕ افزودن کانال", callback_data="auto_add")])
+    await msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+@router.message(F.text == BTN_AUTO)
+async def auto_start(m: Message, state: FSMContext):
+    await state.clear()
+    if not await auto_allowed(m.from_user.id):
+        return await m.answer("⚡ <b>سین خودکار</b>\n\nاین قابلیت به‌زودی فعال می‌شه 🔜")
+    await auto_hub(m, m.from_user.id)
+
+
+@router.callback_query(F.data == "auto_add")
+async def auto_add(c: CallbackQuery, state: FSMContext, bot: Bot):
+    await c.answer()
+    if not await auto_allowed(c.from_user.id):
+        return await c.message.answer("این قابلیت فعلاً فعال نیست.")
+    me = await bot.me()
+    await state.set_state(Auto.channel)
+    await c.message.answer("➕ <b>افزودن کانال به سین خودکار</b>\n\n"
+                           "1️⃣ ربات رو توی کانالت <b>ادمین</b> کن:\n"
+                           f"تنظیمات کانال ← Administrators ← Add Admin ← <code>@{me.username}</code>\n"
+                           "(به هیچ دسترسی خاصی نیاز نداره)\n\n"
+                           "2️⃣ بعد آیدی کانال رو همین‌جا بفرست؛ مثل <code>@mychannel</code>\n\n"
+                           "⚠️ کانال باید <b>عمومی</b> باشه (آیدی @ داشته باشه) و خودت ادمین یا مالکش باشی.",
+                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+
+
+@router.message(Auto.channel, F.text)
+async def auto_channel(m: Message, state: FSMContext, bot: Bot):
+    kb = InlineKeyboardMarkup(inline_keyboard=[cancel_row()])
+    mm = re.search(r"(?:@|https?://t\.me/)([A-Za-z][A-Za-z0-9_]{3,})", m.text or "")
+    if not mm:
+        return await m.answer("آیدی کانال معتبر نیست 🤔\nمثل این بفرست: <code>@mychannel</code>", reply_markup=kb)
+    try:
+        chat = await bot.get_chat(f"@{mm.group(1)}")
+    except TelegramBadRequest:
+        return await m.answer("❌ کانال پیدا نشد یا عمومی نیست. آیدی درست رو بفرست.", reply_markup=kb)
+    except Exception:
+        return await m.answer("الان نتونستم کانال رو چک کنم؛ کمی بعد دوباره امتحان کن 🙏", reply_markup=kb)
+    if chat.type != "channel":
+        return await m.answer("❌ این آیدی مربوط به یه کانال نیست.", reply_markup=kb)
+    me = await bot.me()
+    try:
+        bm = await bot.get_chat_member(chat.id, me.id)
+    except Exception:
+        bm = None
+    if not bm or bm.status not in ("administrator", "creator"):
+        return await m.answer("❌ ربات هنوز توی کانال <b>ادمین</b> نیست.\n\n"
+                              f"تنظیمات کانال ← Administrators ← Add Admin ← <code>@{me.username}</code>\n"
+                              "بعدش دوباره آیدی کانال رو بفرست.", reply_markup=kb)
+    try:
+        um = await bot.get_chat_member(chat.id, m.from_user.id)
+    except Exception:
+        um = None
+    if not um or um.status not in ("administrator", "creator"):
+        return await m.answer("❌ فقط ادمین یا مالک کانال می‌تونه سین خودکار رو فعال کنه.", reply_markup=kb)
+    ex = await one("SELECT user_id FROM auto_channels WHERE chat_id=?", (chat.id,))
+    if ex:
+        return await m.answer("این کانال قبلاً ثبت شده." + (" از همین منوی «سین خودکار» مدیریتش کن." if ex["user_id"] == m.from_user.id else ""),
+                              reply_markup=kb)
+    await state.update_data(chat_id=chat.id, username=chat.username or mm.group(1))
+    svcs = await enabled_services()
+    if not svcs:
+        await state.clear()
+        return await m.answer("🛠 سرویس سین موقتاً در دسترس نیست. کمی بعد دوباره امتحان کن 🙏")
+    if len(svcs) == 1:
+        return await auto_ask_qty(m, state, svcs[0])
+    await state.set_state(Auto.service)
+    lines, rows = [], []
+    for k in svcs:
+        sv, price = SERVICES[k], await svc_price(k)
+        lines.append(f"{sv['name']} — <b>{fmt(price)}</b> تومان برای هر ۱۰۰۰ سین\n{sv['desc']}")
+        rows.append([InlineKeyboardButton(text=f"{sv['name']} • {fmt(price)} تومان", callback_data=f"autosvc:{k}")])
+    rows.append(cancel_row())
+    await m.answer("✅ کانال تایید شد.\n\n<b>سرعت ارسال سین‌ها رو انتخاب کن</b> 👇\n\n" + "\n\n".join(lines),
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def auto_ask_qty(msg: Message, state: FSMContext, key: str):
+    lo, hi = await qty_limits(key)
+    await state.update_data(service=key)
+    await state.set_state(Auto.qty)
+    await msg.answer(f"✅ سرویس: {SERVICES[key]['name']}\n\n"
+                     "👁 تعداد سین برای <b>هر پست جدید</b> رو به‌صورت عدد بنویس و بفرست.\nمثال: <code>1000</code>\n\n"
+                     f"📌 حداقل {fmt(lo)} و حداکثر {fmt(hi)}\n💡 هر ۱۰۰۰ سین = {fmt(await svc_price(key))} تومان",
+                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+
+
+@router.callback_query(F.data.startswith("autosvc:"), Auto.service)
+async def auto_service(c: CallbackQuery, state: FSMContext):
+    key = c.data.split(":")[1]
+    if key not in SERVICES or not await svc_enabled(key):
+        return await c.answer("این سرویس فعلاً فعال نیست.", show_alert=True)
+    await c.answer()
+    await auto_ask_qty(c.message, state, key)
+
+
+@router.message(Auto.qty, F.text)
+async def auto_qty(m: Message, state: FSMContext):
+    d = await state.get_data()
+    key = d.get("service")
+    lo, hi = await qty_limits(key)
+    qty = to_int(m.text)
+    if qty is None or not lo <= qty <= hi:
+        return await m.answer(f"تعداد باید یه <b>عدد</b> بین <b>{fmt(lo)}</b> و <b>{fmt(hi)}</b> باشه 🙏\nدوباره بنویس و بفرست:",
+                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[cancel_row()]))
+    await state.update_data(qty=qty)
+    cap = int(await get_opt("auto_daily_cap", "10"))
+    cost = await auto_cost(qty, key)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ فعال کن", callback_data="auto_ok"),
+                                                InlineKeyboardButton(text="❌ انصراف", callback_data="flow_cancel")]])
+    await m.answer("🧾 <b>خلاصه‌ی سین خودکار</b>\n\n"
+                   f"📣 کانال: @{html.escape(d['username'])}\n"
+                   f"⚙️ سرویس: {SERVICES[key]['name']}\n"
+                   f"👁 سین هر پست جدید: {fmt(qty)}\n"
+                   f"💵 هزینه‌ی هر پست: {fmt(cost)} تومان\n"
+                   f"📅 حداکثر {cap} پست در روز (حداکثر {fmt(cost * cap)} تومان در روز)\n\n"
+                   "📌 فقط پست‌های <b>بعد از فعال شدن</b> حساب می‌شن. هر وقت خواستی می‌تونی متوقفش کنی.", reply_markup=kb)
+
+
+@router.callback_query(F.data == "auto_ok")
+async def auto_confirm(c: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    await state.clear()
+    if not all(k in d for k in ("chat_id", "username", "service", "qty")):
+        return await c.answer("این درخواست منقضی شده؛ دوباره امتحان کن.", show_alert=True)
+    cap = int(await get_opt("auto_daily_cap", "10"))
+    cur = await db.execute(
+        "INSERT INTO auto_channels(chat_id,username,user_id,qty,service,daily_cap,enabled,created) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (chat_id) DO NOTHING",
+        (d["chat_id"], d["username"], c.from_user.id, d["qty"], d["service"], cap, 1, int(time.time())))
+    await c.answer()
+    if cur.rowcount != 1:
+        return await c.message.edit_text("این کانال قبلاً ثبت شده.")
+    await c.message.edit_text("✅ <b>سین خودکار فعال شد!</b>\n\n"
+                              f"از حالا برای هر پست جدید @{html.escape(d['username'])}, {fmt(d['qty'])} سین خودکار ثبت می‌شه و بهت پیام می‌دم.")
+
+
+async def _own_channel(c: CallbackQuery, cid: int):
+    return await one("SELECT * FROM auto_channels WHERE id=? AND user_id=?", (cid, c.from_user.id))
+
+
+@router.callback_query(F.data.startswith("auto_t:"))
+async def auto_toggle(c: CallbackQuery):
+    r = await _own_channel(c, int(c.data.split(":")[1]))
+    if not r:
+        return await c.answer("پیدا نشد.", show_alert=True)
+    if r["enabled"]:
+        await db.execute("UPDATE auto_channels SET enabled=0, paused_reason=NULL WHERE id=?", (r["id"],))
+        await c.answer("متوقف شد ⏸")
+    else:
+        await db.execute("UPDATE auto_channels SET enabled=1, paused_reason=NULL WHERE id=?", (r["id"],))
+        await c.answer("روشن شد ▶️")
+    await auto_hub(c.message, c.from_user.id)
+
+
+@router.callback_query(F.data.startswith("auto_d:"))
+async def auto_delete(c: CallbackQuery):
+    r = await _own_channel(c, int(c.data.split(":")[1]))
+    if not r:
+        return await c.answer("پیدا نشد.", show_alert=True)
+    await db.execute("DELETE FROM auto_channels WHERE id=?", (r["id"],))
+    await c.answer("حذف شد 🗑")
+    await auto_hub(c.message, c.from_user.id)
+
+
+async def pause_channel(bot, row, reason, text, kb=None):
+    await db.execute("UPDATE auto_channels SET enabled=0, paused_reason=? WHERE id=?", (reason, row["id"]))
+    with suppress(Exception):
+        await bot.send_message(row["user_id"], text, reply_markup=kb)
+
+
+async def process_auto_post(bot, m):
+    if (await get_opt("auto_mode", "off")) == "off":
+        return
+    row = await one("SELECT * FROM auto_channels WHERE chat_id=?", (m.chat.id,))
+    if not row or not row["enabled"] or not await auto_allowed(row["user_id"]):
+        return
+    uid, chat_id = row["user_id"], m.chat.id
+    async with _chan_locks.setdefault(chat_id, asyncio.Lock()):
+        now = int(time.time())
+        cur = await db.execute("INSERT INTO auto_posts(chat_id,post_id,media_group_id,status,created) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING",
+                               (chat_id, m.message_id, m.media_group_id, "new", now))
+        if cur.rowcount != 1:
+            return
+
+        async def done(status, order_id=None):
+            await db.execute("UPDATE auto_posts SET status=?, order_id=? WHERE chat_id=? AND post_id=?", (status, order_id, chat_id, m.message_id))
+
+        uname = m.chat.username
+        if not uname:
+            await done("paused")
+            return await pause_channel(bot, row, "private", f"⏸ سین خودکار کانالت متوقف شد: کانال دیگه عمومی نیست (آیدی @ نداره).")
+        if now - m.date.timestamp() > int(await get_opt("auto_max_age_min", "180")) * 60:
+            return await done("old")
+        if await is_maintenance():
+            await done("maint")
+            if await notice_once(f"auto_maint_{chat_id}", 86400):
+                with suppress(Exception):
+                    await bot.send_message(uid, "🛠 سفارش‌گیری موقتاً متوقفه؛ سین خودکار این پست ثبت نشد.")
+            return
+        key = row["service"]
+        if key not in SERVICES or not await svc_enabled(key):
+            await done("svc_off")
+            if await notice_once(f"auto_svc_{chat_id}", 3600):
+                with suppress(Exception):
+                    await bot.send_message(uid, "⚠️ سرویس انتخابی سین خودکارت موقتاً در دسترس نیست؛ این پست ثبت نشد.")
+            return
+        cap = min(row["daily_cap"] or 10 ** 9, int(await get_opt("auto_daily_cap", "10")))
+        start, _end = day_range(ir_day())
+        used = (await one("SELECT COUNT(*) AS n FROM auto_posts WHERE chat_id=? AND status IN ('ordered','unknown') AND created>=?",
+                          (chat_id, start)))["n"]
+        if used >= cap:
+            await done("capped")
+            if await notice_once(f"auto_cap_{chat_id}", 43200):
+                with suppress(Exception):
+                    await bot.send_message(uid, f"📅 امروز به سقف {cap} پست رسیدی؛ پست‌های بعدیِ امروز سفارش داده نمی‌شن و از فردا خودکار ادامه پیدا می‌کنه.")
+            return
+        qty, prov = row["qty"], SERVICES[key]["provider"]
+        cost = await auto_cost(qty, key)
+        link = f"https://t.me/{uname}/{m.message_id}"
+        oid = await reserve_order(uid, link, qty, cost, "view", None, 1, None, prov)
+        if oid is None:
+            await done("paused")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💰 شارژ کیف پول", callback_data="go_charge")]])
+            return await pause_channel(bot, row, "balance",
+                                       f"⏸ <b>سین خودکار متوقف شد</b>\nموجودی کیف پولت برای پست جدید @{html.escape(uname)} ({fmt(cost)} تومان) کافی نبود.\n"
+                                       "بعد از شارژ، از منوی «⚡ سین خودکار» دوباره روشنش کن.", kb)
+        st, info = await place_order(oid, link, qty, "view", None, None, prov)
+        if st == "ok":
+            await done("ordered", oid)
+            with suppress(Exception):
+                await bot.send_message(uid, f"⚡ <b>سین خودکار</b>\nبرای پست جدید @{html.escape(uname)} تعداد <b>{fmt(qty)} سین</b> ثبت شد 💙\n"
+                                            f"🔗 {link}\n💵 {fmt(cost)} تومان از کیف پولت کم شد.", disable_web_page_preview=True)
+        elif st == "unknown":
+            await done("unknown", oid)
+            await notify_admins(bot, f"🚨 <b>سفارش نامشخص #{oid}</b> (سین خودکار، کاربر <code>{uid}</code>)\n{link} | {fmt(qty)} سین\n"
+                                     f"اگه توی پنل provider ثبت شده: /resolve {oid} شماره_سفارش_provider\nاگه ثبت نشده: /refund {oid}")
+            with suppress(Exception):
+                await bot.send_message(uid, f"⏳ سفارش خودکار پست جدید @{html.escape(uname)} در حال بررسیه؛ نتیجه رو بهت خبر می‌دم.")
+        else:
+            await done("failed", oid)
+            if await notice_once(f"auto_fail_{chat_id}", 3600):
+                await notify_admins(bot, f"⚠️ سفارش خودکار ثبت نشد (کاربر {uid}, @{uname}):\n{html.escape(str(info)[:300])}")
+                with suppress(Exception):
+                    await bot.send_message(uid, f"⚠️ سفارش خودکار پست جدیدت ثبت نشد و {fmt(cost)} تومان به کیف پولت برگشت.")
+        await asyncio.sleep(0.5)
+
+
+@router.channel_post()
+async def on_channel_post(m: Message, bot: Bot):
+    await process_auto_post(bot, m)
+
+
+@router.my_chat_member()
+async def on_my_chat_member(ev, bot: Bot):
+    if ev.chat.type != "channel" or ev.new_chat_member.status in ("administrator", "creator"):
+        return
+    rows = await many("SELECT * FROM auto_channels WHERE chat_id=? AND enabled=1", (ev.chat.id,))
+    for r in rows:
+        await pause_channel(bot, r, "removed", f"⏸ سین خودکار @{html.escape(r['username'])} متوقف شد: ربات دیگه ادمین کانال نیست.\n"
+                                               "دوباره ادمینش کن و از منوی «⚡ سین خودکار» روشنش کن.")
+
+
+@router.message(Command("auto"), IS_ADMIN)
+async def cmd_auto(m: Message, command: CommandObject):
+    arg = (command.args or "").strip().lower()
+    names = {"off": "خاموش", "beta": "آزمایشی (فقط ادمین‌ها و لیست /autobeta)", "on": "روشن برای همه"}
+    if arg not in names:
+        cur = await get_opt("auto_mode", "off")
+        return await m.answer(f"فرمت: /auto off | beta | on\nوضعیت فعلی: {names.get(cur, cur)}")
+    await set_setting("auto_mode", arg)
+    await m.answer(f"⚡ سین خودکار: <b>{names[arg]}</b>")
+
+
+@router.message(Command("autobeta"), IS_ADMIN)
+async def cmd_autobeta(m: Message, command: CommandObject):
+    ids = [x for x in (command.args or "").replace(",", " ").split() if x.isdigit()]
+    if not ids:
+        return await m.answer(f"فرمت: /autobeta 111 222\nلیست فعلی: {await get_opt('auto_beta', '') or '—'}")
+    await set_setting("auto_beta", ",".join(ids))
+    await m.answer(f"✅ لیست آزمایشی: {', '.join(ids)}")
+
+
+@router.message(Command("autocap"), IS_ADMIN)
+async def cmd_autocap(m: Message, command: CommandObject):
+    v = to_int(command.args)
+    if not v:
+        return await m.answer(f"فرمت: /autocap 10\nسقف فعلی: {await get_opt('auto_daily_cap', '10')} پست در روز برای هر کانال")
+    await set_setting("auto_daily_cap", v)
+    await m.answer(f"✅ سقف روزانه برای همه‌ی کانال‌ها: {v} پست")
+
+
+@router.message(Command("autolist"), IS_ADMIN)
+async def cmd_autolist(m: Message):
+    start, _e = day_range(ir_day())
+    rows = await many("SELECT * FROM auto_channels ORDER BY id DESC LIMIT 30")
+    if not rows:
+        return await m.answer("کانالی ثبت نشده.")
+    lines = []
+    for r in rows:
+        n = (await one("SELECT COUNT(*) AS n FROM auto_posts WHERE chat_id=? AND status='ordered' AND created>=?", (r["chat_id"], start)))["n"]
+        lines.append(f"#{r['id']} @{r['username']} • کاربر <code>{r['user_id']}</code> • {fmt(r['qty'])} سین • "
+                     f"{'🟢' if r['enabled'] else '⏸ ' + PAUSE_TEXT.get(r['paused_reason'], '')} • امروز: {n}")
+    await m.answer("⚡ <b>کانال‌های سین خودکار</b>\n\n" + "\n".join(lines))
+
+
+@router.message(Command("autooff"), IS_ADMIN)
+async def cmd_autooff(m: Message, command: CommandObject, bot: Bot):
+    cid = to_int(command.args)
+    r = await one("SELECT * FROM auto_channels WHERE id=?", (cid,)) if cid else None
+    if not r:
+        return await m.answer("فرمت: /autooff شماره_کانال (از /autolist)")
+    await pause_channel(bot, r, "admin", f"⏸ سین خودکار @{html.escape(r['username'])} توسط مدیریت متوقف شد. برای اطلاعات بیشتر به پشتیبانی پیام بده.")
+    await m.answer("✅ متوقف شد.")
+
+
+@router.message(StateFilter(None), F.photo | F.document | F.text)
+async def receipt_in(m: Message, bot: Bot):
+    if m.text and m.text.startswith("/"):
+        return
+    uid = m.from_user.id
+    is_media = bool(m.photo or m.document)
+    t = await one("SELECT * FROM topups WHERE user_id=? AND status='awaiting' ORDER BY id DESC LIMIT 1", (uid,))
+    if not t:
+        if is_media:
+            t2 = await one("SELECT * FROM topups WHERE user_id=? AND status='claimed' AND expires>? ORDER BY id DESC LIMIT 1",
+                           (uid, int(time.time()) - 7200))
+            if t2:
+                for a in ADMIN_IDS:
+                    with suppress(Exception):
+                        cp = await bot.copy_message(chat_id=a, from_chat_id=m.chat.id, message_id=m.message_id)
+                        await bot.send_message(a, f"🧾 رسید اضافه برای درخواست #{t2['id']}", reply_to_message_id=cp.message_id,
+                                               reply_markup=admin_topup_kb(t2["id"]))
+                await m.answer("✅ این رسید هم برای ادمین ارسال شد.")
+        return
+    digits = sum(ch.isdigit() for ch in (m.text or ""))
+    if not is_media and digits < 6:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ لغو درخواست شارژ", callback_data=f"cancel:{t['id']}")]])
+        return await m.answer("🧾 منتظر رسید پرداختت هستم.\nعکس رسید یا شماره‌ی پیگیری (حداقل ۶ رقم) رو بفرست.", reply_markup=kb)
+    key = None
+    if m.photo:
+        key = m.photo[-1].file_unique_id
+    elif m.document:
+        key = m.document.file_unique_id
+    elif m.text:
+        key = "t:" + m.text.strip().lower()
+    dup = await one("SELECT id, status FROM topups WHERE receipt_uid=? AND id<>? LIMIT 1", (key, t["id"])) if key else None
+    cur = await db.execute("UPDATE topups SET status='claimed', receipt_uid=? WHERE id=? AND status='awaiting'", (key, t["id"]))
+    if cur.rowcount != 1:
+        return
+    warn = (f"🚨 <b>هشدار: این رسید قبلاً برای درخواست #{dup['id']} ({dup['status']}) ثبت شده!</b>\n\n" if dup else "")
+    for a in ADMIN_IDS:
+        with suppress(Exception):
+            cp = await bot.copy_message(chat_id=a, from_chat_id=m.chat.id, message_id=m.message_id)
+            await bot.send_message(a, warn + "🧾 <b>رسید بالا</b> مربوط به این پرداخته:\n\n" + admin_topup_text(t, m.from_user.username),
+                                   reply_markup=admin_topup_kb(t["id"]), reply_to_message_id=cp.message_id)
+    await m.answer("✅ <b>رسیدت ثبت و برای ادمین ارسال شد.</b>\nبعد از تایید، کیف پولت شارژ می‌شه و همین‌جا بهت خبر می‌دم 🙏")
+
+
+@router.errors()
+async def on_error(event: ErrorEvent, bot: Bot):
+    logging.error("handler error", exc_info=event.exception)
+    await report_error(bot, "handler", event.exception)
+    upd = event.update
+    with suppress(Exception):
+        if upd.message:
+            await upd.message.answer("⚠️ یه خطای موقت پیش اومد. لطفاً دوباره امتحان کن.")
+        elif upd.callback_query:
+            await upd.callback_query.answer("⚠️ خطای موقت؛ دوباره امتحان کن", show_alert=True)
+    return True
+
+
+async def health_server():
+    from aiohttp import web
+
+    async def ok(_):
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_get("/", ok)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000"))).start()
+    except OSError as e:
+        logging.warning("health server could not bind: %s", e)
+
+
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await health_server()
+    await init_db()
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.message.outer_middleware(Guard())
+    dp.callback_query.outer_middleware(Guard())
+    dp.include_router(router)
+    asyncio.create_task(poll_orders(bot))
+    asyncio.create_task(daily_jobs(bot))
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
