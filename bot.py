@@ -125,10 +125,14 @@ BTN_ORDER, BTN_CHARGE, BTN_ACC = "🛒 ثبت سفارش سین", "💰 شارژ
 BTN_ORDERS, BTN_SUPPORT, BTN_HELP = "📦 سفارش‌های من", "💬 پشتیبانی", "📖 راهنما و قوانین"
 BTN_REACT = "👍 ثبت ریکشن"
 BTN_LAST, BTN_LIKE = "📚 سین چند پست آخر", "🗳 رأی نظرسنجی"
+BTN_AUTO = "⚡ سین خودکار"
+AUTO_MENU = os.getenv("AUTO_MENU", "0") == "1"  # نمایش دکمه‌ی سین خودکار توی منو (وقتی آماده‌ی عرضه‌ست روشنش کن)
 _menu_rows = [[KeyboardButton(text=BTN_ORDER)]]
 if EXTRAS:
     _menu_rows = [[KeyboardButton(text=BTN_ORDER), KeyboardButton(text=BTN_LAST)],
                   [KeyboardButton(text=BTN_REACT), KeyboardButton(text=BTN_LIKE)]]
+if AUTO_MENU:
+    _menu_rows.append([KeyboardButton(text=BTN_AUTO)])
 MENU = ReplyKeyboardMarkup(
     keyboard=_menu_rows + [[KeyboardButton(text=BTN_CHARGE), KeyboardButton(text=BTN_ACC)],
                            [KeyboardButton(text=BTN_ORDERS), KeyboardButton(text=BTN_SUPPORT)],
@@ -137,7 +141,7 @@ MENU = ReplyKeyboardMarkup(
     input_field_placeholder="از منوی پایین انتخاب کن 👇",
 )
 
-MENU_TEXTS = {BTN_ORDER, BTN_LAST, BTN_REACT, BTN_LIKE, BTN_CHARGE, BTN_ACC, BTN_ORDERS, BTN_SUPPORT, BTN_HELP}
+MENU_TEXTS = {BTN_AUTO, BTN_ORDER, BTN_LAST, BTN_REACT, BTN_LIKE, BTN_CHARGE, BTN_ACC, BTN_ORDERS, BTN_SUPPORT, BTN_HELP}
 
 router = Router()
 IS_ADMIN = F.from_user.id.in_(ADMIN_IDS)
@@ -219,6 +223,9 @@ SCHEMA = [
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS posts INTEGER DEFAULT 1",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS opt TEXT",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider TEXT",
+    "CREATE TABLE IF NOT EXISTS auto_channels(id BIGSERIAL PRIMARY KEY, chat_id BIGINT UNIQUE, username TEXT, user_id BIGINT, qty BIGINT, service TEXT, daily_cap INTEGER, enabled INTEGER DEFAULT 1, paused_reason TEXT, created BIGINT)",
+    "CREATE TABLE IF NOT EXISTS auto_posts(id BIGSERIAL PRIMARY KEY, chat_id BIGINT, post_id BIGINT, media_group_id TEXT, order_id BIGINT, status TEXT, created BIGINT, UNIQUE(chat_id, post_id))",
+    "CREATE UNIQUE INDEX IF NOT EXISTS auto_posts_group ON auto_posts(chat_id, media_group_id) WHERE media_group_id IS NOT NULL",
     "CREATE TABLE IF NOT EXISTS ledger(id BIGSERIAL PRIMARY KEY, user_id BIGINT, amount BIGINT, reason TEXT, ts BIGINT)",
 ]
 
@@ -620,6 +627,7 @@ async def build_report(start, end, title):
     top = await one("SELECT COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM ledger WHERE reason LIKE 'topup-%' AND ts>=? AND ts<?", (start, end))
     ref = await one("SELECT COALESCE(SUM(amount),0) AS s FROM ledger WHERE reason LIKE 'refund%' AND ts>=? AND ts<?", (start, end))
     newu = await one("SELECT COUNT(*) AS n FROM users WHERE joined>=? AND joined<?", (start, end))
+    autos = await one("SELECT COUNT(*) AS n FROM auto_posts WHERE status='ordered' AND created>=? AND created<?", (start, end))
     debt = await one("SELECT COALESCE(SUM(balance),0) AS s FROM users")
     pend = await one("SELECT COUNT(*) AS n FROM topups WHERE status='claimed'")
     unk = await one("SELECT COUNT(*) AS n FROM orders WHERE status='Unknown'")
@@ -633,7 +641,7 @@ async def build_report(start, end, title):
             f"🏭 هزینه‌ی تقریبی: {fmt(cost)} تومان\n"
             f"{profit}\n"
             f"↩️ برگشتی به کیف‌پول‌ها: {fmt(ref['s'])} تومان\n"
-            f"👥 کاربر جدید: {newu['n']}\n\n"
+            f"👥 کاربر جدید: {newu['n']} | ⚡ سفارش خودکار: {autos['n']}\n\n"
             f"👛 مجموع موجودی کیف‌پول مشتری‌ها (بدهی تو): <b>{fmt(debt['s'])}</b> تومان\n"
             f"{prov}\n"
             f"⏳ رسید در انتظار: {pend['n']} | ⚠️ سفارش نامشخص: {unk['n']}")
@@ -641,7 +649,7 @@ async def build_report(start, end, title):
 
 async def make_backup():
     data = {}
-    for t in ("users", "settings", "topups", "orders", "ledger"):
+    for t in ("users", "settings", "topups", "orders", "ledger", "auto_channels", "auto_posts"):
         data[t] = [dict(r) for r in await many(f"SELECT * FROM {t}")]
     raw = json.dumps({"version": 1, "created": int(time.time()), "tables": data}, ensure_ascii=False, default=str)
     return gzip.compress(raw.encode("utf-8"))
@@ -805,6 +813,7 @@ HELP_TEXT = (
     "• برای شارژ، دقیقاً همون مبلغی که ربات نشون می‌ده رو واریز کن تا سریع‌تر تایید بشه.\n"
     "• زمان رسیدن سفارش بسته به شرایط تلگرام ممکنه کمی متفاوت باشه.\n\n"
     "💬 هر سوال دیگه‌ای داشتی، «💬 پشتیبانی» رو بزن."
+    + ("\n\n⚡ <b>سین خودکار:</b> ربات رو ادمین کانالت کن تا برای هر پست جدید، خودکار سین ثبت بشه." if AUTO_MENU else "")
 )
 
 
@@ -1887,6 +1896,8 @@ async def admin_panel(m: Message, state: FSMContext):
             plines.append(f"💵 {SERVICES[k]['name']} هر ۱۰۰۰ سین: {fmt(await svc_price(k))}" + ("" if k in on else " (خاموش)"))
     pline = "\n".join(plines) or f"💵 قیمت هر ۱۰۰۰ سین: {fmt(price)}"
     maint = await is_maintenance()
+    amode = {"off": "خاموش", "beta": "آزمایشی", "on": "روشن"}.get(await get_opt("auto_mode", "off"), "خاموش")
+    nauto = (await one("SELECT COUNT(*) AS n FROM auto_channels WHERE enabled=1"))["n"]
     rline = (f"\n👍 قیمت هر ۱۰۰ ریکشن: {fmt(await get_setting('react_price_per_100'))}"
              f"\n🗳 قیمت هر ۱۰۰ رأی: {fmt(await get_setting('like_price_per_100'))}") if REACT_ENABLED else ""
     await m.answer(
@@ -1894,9 +1905,9 @@ async def admin_panel(m: Message, state: FSMContext):
         f"📊 کاربران: {u['n']} | مجموع موجودی کیف‌پول‌ها: {fmt(u['b'])}\n"
         f"🛒 سفارش‌ها: {o['n']} | فروش: {fmt(o['s'])}\n"
         f"🕓 رسید در انتظار: {p['n']}\n⚠️ سفارش نامشخص: {unk}\n{pline}{rline}\n"
-        f"🛠 حالت تعمیر: {'روشن' if maint else 'خاموش'}\n\n"
+        f"🛠 حالت تعمیر: {'روشن' if maint else 'خاموش'}\n⚡ سین خودکار: {amode} | کانال فعال: {nauto}\n\n"
         "<b>دستورات:</b>\n/user آیدی یا @یوزرنیم\n/pending رسیدهای در انتظار\n/add id مبلغ\n/sub id مبلغ\n"
-        "/ban id\n/unban id\n/price مبلغ یا /price fast|eco مبلغ\n/service fast|eco on|off\n/card متن کارت\n/limits حداقل حداکثر\n"
+        "/ban id\n/unban id\n/price مبلغ یا /price fast|eco مبلغ\n/service fast|eco on|off\n/auto off|beta|on\n/autobeta آیدی‌ها\n/autocap تعداد\n/autolist\n/autooff id\n/card متن کارت\n/limits حداقل حداکثر\n"
         "/support @آیدی\n/brand نام ربات\n/provider موجودی provider\n/unknown سفارش‌های نامشخص\n/resolve id شماره\n/refund id\n/rprice مبلغ (قیمت هر ۱۰۰ ریکشن)\n/lprice مبلغ (قیمت هر ۱۰۰ رأی)\n"
         "/maintenance on|off\n/report [روز_قبل]\n/backup\n/broadcast متن",
         reply_markup=admin_kb(maint))
@@ -2201,42 +2212,4 @@ async def adm_maint(c: CallbackQuery):
 
 
 @router.message(Command("report"), IS_ADMIN)
-async def cmd_report(m: Message, command: CommandObject):
-    back = to_int(command.args) or 0
-    start, end = day_range(ir_day() - back)
-    await m.answer(await build_report(start, end, "امروز" if back == 0 else f"{back} روز قبل"))
-
-
-@router.callback_query(F.data == "adm_report", IS_ADMIN)
-async def adm_report(c: CallbackQuery):
-    await c.answer()
-    start, end = day_range(ir_day())
-    await c.message.answer(await build_report(start, end, "امروز"))
-
-
-@router.message(Command("backup"), IS_ADMIN)
-async def cmd_backup(m: Message, bot: Bot):
-    await send_backup(bot)
-    await m.answer("✅ بکاپ ارسال شد.")
-
-
-@router.callback_query(F.data == "adm_backup", IS_ADMIN)
-async def adm_backup(c: CallbackQuery, bot: Bot):
-    await c.answer("در حال ساخت بکاپ...")
-    await send_backup(bot)
-
-
-@router.message(Command("unknown"), IS_ADMIN)
-async def cmd_unknown(m: Message):
-    rows = await many("SELECT * FROM orders WHERE status='Unknown' ORDER BY id")
-    if not rows:
-        return await m.answer("سفارش نامشخصی نیست ✅")
-    for o in rows:
-        await m.answer(f"#{o['id']} • کاربر <code>{o['user_id']}</code> • {order_label(o)}\n{o['link']}\n"
-                       f"/resolve {o['id']} شماره_provider\n/refund {o['id']}", disable_web_page_preview=True)
-
-
-@router.message(Command("resolve"), IS_ADMIN)
-async def cmd_resolve(m: Message, command: CommandObject, bot: Bot):
-    parts = (command.args or "").split()
-    oid = to_int(par
+async def cmd_report(m: Message,
